@@ -1,9 +1,6 @@
-const GAKE_WALLET =
-  "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
-
 export default {
   async fetch(request, env, ctx) {
-    // Helius sends webhook events with POST
+    // فقط POST را قبول می‌کنیم
     if (request.method !== "POST") {
       return new Response("Gake Trader Bot is running", {
         status: 200,
@@ -11,85 +8,73 @@ export default {
     }
 
     try {
-      const payload = await request.json();
+      const body = await request.json();
 
-      console.log("========== HELIUS WEBHOOK ==========");
-      console.log("Received at:", new Date().toISOString());
-      console.log("Payload type:", Array.isArray(payload) ? "ARRAY" : typeof payload);
+      // Helius معمولاً webhook را به صورت آرایه می‌فرستد
+      const events = Array.isArray(body) ? body : [body];
 
-      const events = Array.isArray(payload) ? payload : [payload];
+      for (const tx of events) {
+        console.log("========== HELIUS TRANSACTION ==========");
 
-      console.log("Number of events:", events.length);
+        console.log("Signature:", tx.signature || "N/A");
+        console.log("Type:", tx.type || "N/A");
+        console.log("Description:", tx.description || "N/A");
+        console.log("Source:", tx.source || "N/A");
 
-      for (const event of events) {
-        console.log("---------- EVENT ----------");
+        // اطلاعات پرداخت SOL
+        if (Array.isArray(tx.nativeTransfers)) {
+          console.log("Native Transfers:");
 
-        console.log("Signature:", event.signature || "N/A");
-        console.log("Type:", event.type || "N/A");
-        console.log("Source:", event.source || "N/A");
-        console.log("Description:", event.description || "N/A");
-        console.log("Timestamp:", event.timestamp || "N/A");
-
-        // Native SOL transfers
-        if (event.nativeTransfers) {
-          console.log(
-            "Native transfers:",
-            JSON.stringify(event.nativeTransfers)
-          );
-        }
-
-        // Token transfers
-        if (event.tokenTransfers) {
-          console.log(
-            "Token transfers:",
-            JSON.stringify(event.tokenTransfers)
-          );
-        }
-
-        // Account-level parsed data
-        if (event.accountData) {
-          console.log(
-            "Account data:",
-            JSON.stringify(event.accountData)
-          );
-        }
-
-        // Keep the raw event available for analysis
-        console.log(
-          "RAW EVENT:",
-          JSON.stringify(event)
-        );
-
-        // Basic Buy/Sell detection from the Helius description
-        const description = (event.description || "").toLowerCase();
-
-        let detectedAction = "UNKNOWN";
-
-        if (
-          description.includes("swapped") &&
-          description.includes("for")
-        ) {
-          if (
-            description.includes("sol for") ||
-            description.includes("solana for")
-          ) {
-            detectedAction = "BUY_CANDIDATE";
+          for (const transfer of tx.nativeTransfers) {
+            console.log({
+              from: transfer.fromUserAccount,
+              to: transfer.toUserAccount,
+              amountSOL:
+                typeof transfer.amount === "number"
+                  ? transfer.amount / 1e9
+                  : null,
+            });
           }
         }
 
-        if (
-          description.includes("for sol") ||
-          description.includes("for solana")
-        ) {
-          detectedAction = "SELL_CANDIDATE";
+        // اطلاعات توکن
+        if (Array.isArray(tx.tokenTransfers)) {
+          console.log("Token Transfers:");
+
+          for (const transfer of tx.tokenTransfers) {
+            console.log({
+              from: transfer.fromUserAccount,
+              to: transfer.toUserAccount,
+              mint: transfer.mint,
+              amount: transfer.tokenAmount,
+            });
+          }
         }
 
-        console.log("Detected action:", detectedAction);
-        console.log("Monitored wallet:", GAKE_WALLET);
+        // تشخیص اولیه SWAP / BUY
+        if (
+          tx.type === "SWAP" ||
+          tx.type === "BUY"
+        ) {
+          console.log(">>> SWAP/BUY DETECTED <<<");
+
+          // اگر توکن دریافتی وجود داشته باشد
+          if (Array.isArray(tx.tokenTransfers)) {
+            for (const transfer of tx.tokenTransfers) {
+              if (transfer.toUserAccount) {
+                console.log(
+                  "Possible received token mint:",
+                  transfer.mint
+                );
+              }
+            }
+          }
+        }
+
+        console.log("========================================");
       }
 
-      console.log("========== END WEBHOOK ==========");
-
+      // Helius باید پاسخ موفق دریافت کند
       return new Response(
         JSON.stringify({
           ok: true,
@@ -103,8 +88,9 @@ export default {
         }
       );
     } catch (error) {
-      console.error("WEBHOOK ERROR:", error);
+      console.error("Webhook error:", error);
 
+      // برای خطای JSON، 400 می‌دهیم
       return new Response(
         JSON.stringify({
           ok: false,
