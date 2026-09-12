@@ -1,6 +1,5 @@
 export default {
   async fetch(request, env, ctx) {
-    // فقط POST را قبول می‌کنیم
     if (request.method !== "POST") {
       return new Response("Gake Trader Bot is running", {
         status: 200,
@@ -9,72 +8,54 @@ export default {
 
     try {
       const body = await request.json();
-
-      // Helius معمولاً webhook را به صورت آرایه می‌فرستد
       const events = Array.isArray(body) ? body : [body];
 
       for (const tx of events) {
-        console.log("========== HELIUS TRANSACTION ==========");
+        console.log("========== NEW HELIUS EVENT ==========");
 
-        console.log("Signature:", tx.signature || "N/A");
-        console.log("Type:", tx.type || "N/A");
-        console.log("Description:", tx.description || "N/A");
-        console.log("Source:", tx.source || "N/A");
+        console.log("SIGNATURE:", tx.signature || "N/A");
+        console.log("TYPE:", tx.type || "N/A");
+        console.log("SOURCE:", tx.source || "N/A");
+        console.log("DESCRIPTION:", tx.description || "N/A");
 
-        // اطلاعات پرداخت SOL
-        if (Array.isArray(tx.nativeTransfers)) {
-          console.log("Native Transfers:");
+        console.log("----- NATIVE TRANSFERS -----");
 
-          for (const transfer of tx.nativeTransfers) {
-            console.log({
-              from: transfer.fromUserAccount,
-              to: transfer.toUserAccount,
-              amountSOL:
-                typeof transfer.amount === "number"
-                  ? transfer.amount / 1e9
-                  : null,
-            });
-          }
-        }
-
-        // اطلاعات توکن
-        if (Array.isArray(tx.tokenTransfers)) {
-          console.log("Token Transfers:");
-
-          for (const transfer of tx.tokenTransfers) {
-            console.log({
-              from: transfer.fromUserAccount,
-              to: transfer.toUserAccount,
-              mint: transfer.mint,
-              amount: transfer.tokenAmount,
-            });
-          }
-        }
-
-        // تشخیص اولیه SWAP / BUY
         if (
-          tx.type === "SWAP" ||
-          tx.type === "BUY"
+          Array.isArray(tx.nativeTransfers) &&
+          tx.nativeTransfers.length > 0
         ) {
-          console.log(">>> SWAP/BUY DETECTED <<<");
-
-          // اگر توکن دریافتی وجود داشته باشد
-          if (Array.isArray(tx.tokenTransfers)) {
-            for (const transfer of tx.tokenTransfers) {
-              if (transfer.toUserAccount) {
-                console.log(
-                  "Possible received token mint:",
-                  transfer.mint
-                );
-              }
-            }
-          }
+          tx.nativeTransfers.forEach((transfer, index) => {
+            console.log(
+              "NATIVE #" + index,
+              JSON.stringify(transfer)
+            );
+          });
+        } else {
+          console.log("No native transfers");
         }
 
-        console.log("========================================");
+        console.log("----- TOKEN TRANSFERS -----");
+
+        if (
+          Array.isArray(tx.tokenTransfers) &&
+          tx.tokenTransfers.length > 0
+        ) {
+          tx.tokenTransfers.forEach((transfer, index) => {
+            console.log(
+              "TOKEN #" + index,
+              JSON.stringify(transfer)
+            );
+          });
+        } else {
+          console.log("No token transfers");
+        }
+
+        console.log("----- FULL TRANSACTION -----");
+        console.log(JSON.stringify(tx));
+
+        console.log("========== END EVENT ==========");
       }
 
-      // Helius باید پاسخ موفق دریافت کند
       return new Response(
         JSON.stringify({
           ok: true,
@@ -88,9 +69,8 @@ export default {
         }
       );
     } catch (error) {
-      console.error("Webhook error:", error);
+      console.error("WEBHOOK ERROR:", String(error));
 
-      // برای خطای JSON، 400 می‌دهیم
       return new Response(
         JSON.stringify({
           ok: false,
