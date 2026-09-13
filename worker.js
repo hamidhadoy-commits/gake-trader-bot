@@ -1,3 +1,6 @@
+const GAKE_WALLET =
+  "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "POST") {
@@ -11,47 +14,80 @@ export default {
       const events = Array.isArray(body) ? body : [body];
 
       for (const tx of events) {
-        console.log("========== NEW HELIUS EVENT ==========");
+        const signature = tx.signature || "N/A";
+        const type = tx.type || "N/A";
+        const source = tx.source || "N/A";
 
-        console.log("SIGNATURE:", tx.signature || "N/A");
-        console.log("TYPE:", tx.type || "N/A");
-        console.log("SOURCE:", tx.source || "N/A");
-        console.log("DESCRIPTION:", tx.description || "N/A");
+        console.log("========== HELIUS EVENT ==========");
+        console.log("SIGNATURE:", signature);
+        console.log("TYPE:", type);
+        console.log("SOURCE:", source);
 
-        console.log("----- NATIVE TRANSFERS -----");
+        let detectedTrade = false;
 
-        if (
-          Array.isArray(tx.nativeTransfers) &&
-          tx.nativeTransfers.length > 0
-        ) {
-          tx.nativeTransfers.forEach((transfer, index) => {
-            console.log(
-              "NATIVE #" + index,
-              JSON.stringify(transfer)
-            );
-          });
-        } else {
-          console.log("No native transfers");
+        // =========================
+        // TOKEN TRANSFERS
+        // =========================
+
+        if (Array.isArray(tx.tokenTransfers)) {
+          for (const transfer of tx.tokenTransfers) {
+            const mint = transfer.mint || "N/A";
+            const amount = transfer.tokenAmount ?? 0;
+
+            const fromUser = transfer.fromUserAccount || "";
+            const toUser = transfer.toUserAccount || "";
+
+            // =========================
+            // BUY
+            // Token enters Gake
+            // =========================
+
+            if (toUser === GAKE_WALLET && fromUser !== GAKE_WALLET) {
+              detectedTrade = true;
+
+              console.log("🟢 BUY DETECTED");
+              console.log(
+                JSON.stringify({
+                  action: "BUY",
+                  wallet: GAKE_WALLET,
+                  signature,
+                  source,
+                  mint,
+                  tokenAmount: amount,
+                  fromUserAccount: fromUser,
+                  toUserAccount: toUser,
+                })
+              );
+            }
+
+            // =========================
+            // SELL
+            // Token leaves Gake
+            // =========================
+
+            if (fromUser === GAKE_WALLET && toUser !== GAKE_WALLET) {
+              detectedTrade = true;
+
+              console.log("🔴 SELL DETECTED");
+              console.log(
+                JSON.stringify({
+                  action: "SELL",
+                  wallet: GAKE_WALLET,
+                  signature,
+                  source,
+                  mint,
+                  tokenAmount: amount,
+                  fromUserAccount: fromUser,
+                  toUserAccount: toUser,
+                })
+              );
+            }
+          }
         }
 
-        console.log("----- TOKEN TRANSFERS -----");
-
-        if (
-          Array.isArray(tx.tokenTransfers) &&
-          tx.tokenTransfers.length > 0
-        ) {
-          tx.tokenTransfers.forEach((transfer, index) => {
-            console.log(
-              "TOKEN #" + index,
-              JSON.stringify(transfer)
-            );
-          });
-        } else {
-          console.log("No token transfers");
+        if (!detectedTrade) {
+          console.log("NO GAKE TRADE DETECTED");
         }
-
-        console.log("----- FULL TRANSACTION -----");
-        console.log(JSON.stringify(tx));
 
         console.log("========== END EVENT ==========");
       }
