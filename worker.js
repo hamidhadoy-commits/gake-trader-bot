@@ -18,78 +18,63 @@ export default {
         const type = tx.type || "N/A";
         const source = tx.source || "N/A";
 
-        console.log("========== HELIUS EVENT ==========");
-        console.log("SIGNATURE:", signature);
-        console.log("TYPE:", type);
-        console.log("SOURCE:", source);
+        if (!Array.isArray(tx.tokenTransfers)) {
+          continue;
+        }
 
-        let detectedTrade = false;
+        for (const transfer of tx.tokenTransfers) {
+          const mint = transfer.mint || "N/A";
+          const tokenAmount = transfer.tokenAmount ?? 0;
 
-        // =========================
-        // TOKEN TRANSFERS
-        // =========================
+          const fromUser = transfer.fromUserAccount || "";
+          const toUser = transfer.toUserAccount || "";
 
-        if (Array.isArray(tx.tokenTransfers)) {
-          for (const transfer of tx.tokenTransfers) {
-            const mint = transfer.mint || "N/A";
-            const amount = transfer.tokenAmount ?? 0;
+          // =========================
+          // BUY
+          // =========================
 
-            const fromUser = transfer.fromUserAccount || "";
-            const toUser = transfer.toUserAccount || "";
+          if (
+            type === "SWAP" &&
+            toUser === GAKE_WALLET &&
+            fromUser !== GAKE_WALLET
+          ) {
+            console.log({
+              message: "🟢 BUY DETECTED",
+              action: "BUY",
+              wallet: GAKE_WALLET,
+              signature: signature,
+              source: source,
+              type: type,
+              mint: mint,
+              tokenAmount: tokenAmount,
+              fromUserAccount: fromUser,
+              toUserAccount: toUser,
+            });
+          }
 
-            // =========================
-            // BUY
-            // Token enters Gake
-            // =========================
+          // =========================
+          // SELL
+          // =========================
 
-            if (toUser === GAKE_WALLET && fromUser !== GAKE_WALLET) {
-              detectedTrade = true;
-
-              console.log("🟢 BUY DETECTED");
-              console.log(
-                JSON.stringify({
-                  action: "BUY",
-                  wallet: GAKE_WALLET,
-                  signature,
-                  source,
-                  mint,
-                  tokenAmount: amount,
-                  fromUserAccount: fromUser,
-                  toUserAccount: toUser,
-                })
-              );
-            }
-
-            // =========================
-            // SELL
-            // Token leaves Gake
-            // =========================
-
-            if (fromUser === GAKE_WALLET && toUser !== GAKE_WALLET) {
-              detectedTrade = true;
-
-              console.log("🔴 SELL DETECTED");
-              console.log(
-                JSON.stringify({
-                  action: "SELL",
-                  wallet: GAKE_WALLET,
-                  signature,
-                  source,
-                  mint,
-                  tokenAmount: amount,
-                  fromUserAccount: fromUser,
-                  toUserAccount: toUser,
-                })
-              );
-            }
+          if (
+            type === "SWAP" &&
+            fromUser === GAKE_WALLET &&
+            toUser !== GAKE_WALLET
+          ) {
+            console.log({
+              message: "🔴 SELL DETECTED",
+              action: "SELL",
+              wallet: GAKE_WALLET,
+              signature: signature,
+              source: source,
+              type: type,
+              mint: mint,
+              tokenAmount: tokenAmount,
+              fromUserAccount: fromUser,
+              toUserAccount: toUser,
+            });
           }
         }
-
-        if (!detectedTrade) {
-          console.log("NO GAKE TRADE DETECTED");
-        }
-
-        console.log("========== END EVENT ==========");
       }
 
       return new Response(
