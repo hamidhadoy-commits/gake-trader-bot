@@ -29,6 +29,10 @@ export default {
           const fromUser = transfer.fromUserAccount || "";
           const toUser = transfer.toUserAccount || "";
 
+          // =========================
+          // BUY DETECTION
+          // =========================
+
           if (
             type === "SWAP" &&
             toUser === GAKE_WALLET &&
@@ -37,6 +41,7 @@ export default {
             console.log({
               message: "🟢 BUY DETECTED",
               action: "BUY",
+
               wallet: GAKE_WALLET,
 
               signature,
@@ -44,19 +49,29 @@ export default {
               type,
 
               description: tx.description || "N/A",
+
               fee: tx.fee ?? 0,
               feePayer: tx.feePayer || "N/A",
 
               mint,
               tokenAmount,
+
               fromUserAccount: fromUser,
               toUserAccount: toUser,
+
+              accountData: Array.isArray(tx.accountData)
+                ? tx.accountData
+                : [],
 
               nativeTransfers: Array.isArray(tx.nativeTransfers)
                 ? tx.nativeTransfers
                 : [],
             });
           }
+
+          // =========================
+          // SELL DETECTION
+          // =========================
 
           if (
             type === "SWAP" &&
@@ -66,6 +81,7 @@ export default {
             console.log({
               message: "🔴 SELL DETECTED",
               action: "SELL",
+
               wallet: GAKE_WALLET,
 
               signature,
@@ -73,13 +89,19 @@ export default {
               type,
 
               description: tx.description || "N/A",
+
               fee: tx.fee ?? 0,
               feePayer: tx.feePayer || "N/A",
 
               mint,
               tokenAmount,
+
               fromUserAccount: fromUser,
               toUserAccount: toUser,
+
+              accountData: Array.isArray(tx.accountData)
+                ? tx.accountData
+                : [],
 
               nativeTransfers: Array.isArray(tx.nativeTransfers)
                 ? tx.nativeTransfers
