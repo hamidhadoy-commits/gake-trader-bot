@@ -29,10 +29,6 @@ export default {
           const fromUser = transfer.fromUserAccount || "";
           const toUser = transfer.toUserAccount || "";
 
-          // =========================
-          // BUY
-          // =========================
-
           if (
             type === "SWAP" &&
             toUser === GAKE_WALLET &&
@@ -42,19 +38,25 @@ export default {
               message: "🟢 BUY DETECTED",
               action: "BUY",
               wallet: GAKE_WALLET,
-              signature: signature,
-              source: source,
-              type: type,
-              mint: mint,
-              tokenAmount: tokenAmount,
+
+              signature,
+              source,
+              type,
+
+              description: tx.description || "N/A",
+              fee: tx.fee ?? 0,
+              feePayer: tx.feePayer || "N/A",
+
+              mint,
+              tokenAmount,
               fromUserAccount: fromUser,
               toUserAccount: toUser,
+
+              nativeTransfers: Array.isArray(tx.nativeTransfers)
+                ? tx.nativeTransfers
+                : [],
             });
           }
-
-          // =========================
-          // SELL
-          // =========================
 
           if (
             type === "SWAP" &&
@@ -65,13 +67,23 @@ export default {
               message: "🔴 SELL DETECTED",
               action: "SELL",
               wallet: GAKE_WALLET,
-              signature: signature,
-              source: source,
-              type: type,
-              mint: mint,
-              tokenAmount: tokenAmount,
+
+              signature,
+              source,
+              type,
+
+              description: tx.description || "N/A",
+              fee: tx.fee ?? 0,
+              feePayer: tx.feePayer || "N/A",
+
+              mint,
+              tokenAmount,
               fromUserAccount: fromUser,
               toUserAccount: toUser,
+
+              nativeTransfers: Array.isArray(tx.nativeTransfers)
+                ? tx.nativeTransfers
+                : [],
             });
           }
         }
