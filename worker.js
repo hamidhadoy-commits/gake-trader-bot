@@ -10,6 +10,15 @@ const OKX_INPUT_PATTERN = [
 
 const OKX_INPUT_TOTAL = 1_000_000;
 
+/*
+ * Temporary in-memory deduplication.
+ *
+ * IMPORTANT:
+ * This is only for the current Worker instance.
+ * It is NOT a permanent database.
+ */
+const processedSignatures = new Set();
+
 function getNativeBalanceChange(accountData, wallet) {
   if (!Array.isArray(accountData)) {
     return 0;
@@ -19,7 +28,9 @@ function getNativeBalanceChange(accountData, wallet) {
     (x) => x?.account === wallet
   );
 
-  return Number(item?.nativeBalanceChange ?? 0);
+  return Number(
+    item?.nativeBalanceChange ?? 0
+  );
 }
 
 function getTokenBalanceChange(
@@ -269,49 +280,6 @@ function findOKXInputPattern(
   };
 }
 
-function getNativeTransfersFromWallet(
-  nativeTransfers,
-  wallet
-) {
-  if (!Array.isArray(nativeTransfers)) {
-    return [];
-  }
-
-  return nativeTransfers.filter(
-    (transfer) =>
-      transfer?.fromUserAccount === wallet
-  );
-}
-
-function getNativeTransfersToWallet(
-  nativeTransfers,
-  wallet
-) {
-  if (!Array.isArray(nativeTransfers)) {
-    return [];
-  }
-
-  return nativeTransfers.filter(
-    (transfer) =>
-      transfer?.toUserAccount === wallet
-  );
-}
-
-function sumTransfers(transfers) {
-  if (!Array.isArray(transfers)) {
-    return 0;
-  }
-
-  return transfers.reduce(
-    (sum, transfer) =>
-      sum +
-      Number(
-        transfer?.amount ?? 0
-      ),
-    0
-  );
-}
-
 function lamportsToSol(lamports) {
   return (
     Number(lamports || 0) /
@@ -375,6 +343,133 @@ function buildRoleAnalysis({
   };
 }
 
+/*
+ * This is the important new function.
+ *
+ * It converts only a HIGH-CONFIDENCE,
+ * successful OKX candidate into a BUY_SIGNAL.
+ *
+ * NO TRADE IS EXECUTED.
+ */
+function buildBuySignal(candidate) {
+  if (!candidate) {
+    return null;
+  }
+
+  if (
+    candidate.source !==
+    "OKX_DEX_ROUTER"
+  ) {
+    return null;
+  }
+
+  if (
+    candidate.type !==
+    "SWAP"
+  ) {
+    return null;
+  }
+
+  if (
+    candidate.transactionError !==
+    null
+  ) {
+    return null;
+  }
+
+  if (
+    candidate.inputPatternMatched !==
+    true
+  ) {
+    return null;
+  }
+
+  if (
+    candidate.inputAccountMatchesTokenTransfer !==
+    true
+  ) {
+    return null;
+  }
+
+  if (
+    candidate.inferredInputConfidence !==
+    "VERY_HIGH"
+  ) {
+    return null;
+  }
+
+  if (
+    Number(
+      candidate.inferredSwapInputSOL
+    ) !== 0.001
+  ) {
+    return null;
+  }
+
+  if (
+    !candidate.mint ||
+    Number(candidate.tokenAmount) <= 0
+  ) {
+    return null;
+  }
+
+  return {
+    message:
+      "🟢 BUY SIGNAL",
+
+    action:
+      "BUY_SIGNAL",
+
+    confidence:
+      "VERY_HIGH",
+
+    signature:
+      candidate.signature,
+
+    source:
+      candidate.source,
+
+    mint:
+      candidate.mint,
+
+    tokenAmount:
+      candidate.tokenAmount,
+
+    inputAccount:
+      candidate.inferredInputAccount,
+
+    inputSOL:
+      candidate.inferredSwapInputSOL,
+
+    inputLamports:
+      candidate.inferredSwapInputLamports,
+
+    fromUserAccount:
+      candidate.fromUserAccount,
+
+    toUserAccount:
+      candidate.toUserAccount,
+
+    gakeWallet:
+      GAKE_WALLET,
+
+    feePayer:
+      candidate.feePayer,
+
+    feeSOL:
+      candidate.feeSOL,
+
+    gakeNativeBalanceChangeSOL:
+      candidate.gakeNativeBalanceChangeSOL,
+
+    detectedAt:
+      new Date().toISOString(),
+
+    execution:
+      "DISABLED",
+  };
+}
+
 function buildSwapCandidate(tx) {
   const signature =
     tx?.signature || "N/A";
@@ -414,8 +509,7 @@ function buildSwapCandidate(tx) {
       transfer?.toUserAccount || "";
 
     /*
-     * We only care about tokens
-     * entering Gake.
+     * Only tokens entering Gake.
      */
     if (
       toUser !== GAKE_WALLET ||
@@ -455,13 +549,8 @@ function buildSwapCandidate(tx) {
       );
 
     /*
-     * IMPORTANT:
-     *
-     * Do NOT use the token source
-     * account as the SOL payer.
-     *
-     * We search nativeTransfers
-     * independently.
+     * Do NOT use token source
+     * as SOL payer.
      */
     const inference =
       findOKXInputPattern(
@@ -520,9 +609,6 @@ function buildSwapCandidate(tx) {
       toUserAccount:
         toUser,
 
-      /*
-       * Gake's own balance change.
-       */
       gakeNativeBalanceChange:
         gakeNativeChange,
 
@@ -534,9 +620,6 @@ function buildSwapCandidate(tx) {
       gakeTokenRawBalanceChange:
         gakeTokenRawChange,
 
-      /*
-       * Transaction fee payer.
-       */
       feePayer,
 
       fee,
@@ -552,9 +635,6 @@ function buildSwapCandidate(tx) {
           feePayerNativeChange
         ),
 
-      /*
-       * Inferred economic input.
-       */
       inferredInputAccount:
         inference.account,
 
@@ -585,9 +665,6 @@ function buildSwapCandidate(tx) {
       inputAccountMatchesTokenTransfer:
         inference.matchesTokenTransferUser,
 
-      /*
-       * Token source is kept separate.
-       */
       tokenSourceUserAccount:
         tokenSource?.userAccount ||
         null,
@@ -614,15 +691,8 @@ function buildSwapCandidate(tx) {
         tokenSource?.decimals ??
         null,
 
-      /*
-       * Role analysis.
-       */
       roleAnalysis,
 
-      /*
-       * All raw transfer data
-       * remains available.
-       */
       nativeTransfers,
 
       accountData,
@@ -679,6 +749,44 @@ export default {
           continue;
         }
 
+        const signature =
+          tx?.signature;
+
+        /*
+         * Ignore malformed events
+         * without a signature.
+         */
+        if (!signature) {
+          console.log(
+            "⚠️ SWAP WITHOUT SIGNATURE"
+          );
+
+          continue;
+        }
+
+        /*
+         * Deduplicate this signature
+         * during the current Worker instance.
+         */
+        if (
+          processedSignatures.has(
+            signature
+          )
+        ) {
+          console.log({
+            message:
+              "♻️ DUPLICATE SWAP IGNORED",
+
+            signature,
+          });
+
+          continue;
+        }
+
+        processedSignatures.add(
+          signature
+        );
+
         const candidates =
           buildSwapCandidate(tx);
 
@@ -686,15 +794,36 @@ export default {
           const candidate
           of candidates
         ) {
+          /*
+           * Keep the complete diagnostic
+           * candidate in the logs.
+           */
           console.log(
             candidate
           );
+
+          /*
+           * Build BUY_SIGNAL.
+           *
+           * This still does NOT trade.
+           */
+          const buySignal =
+            buildBuySignal(
+              candidate
+            );
+
+          if (buySignal) {
+            console.log(
+              buySignal
+            );
+          }
         }
       }
 
       return new Response(
         JSON.stringify({
           ok: true,
+
           received:
             events.length,
         }),
@@ -716,6 +845,7 @@ export default {
       return new Response(
         JSON.stringify({
           ok: false,
+
           error:
             String(error),
         }),
