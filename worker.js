@@ -1,6 +1,15 @@
 const GAKE_WALLET =
   "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 
+const OKX_INPUT_PATTERN = [
+  987654,
+  2963,
+  4691,
+  4692,
+];
+
+const OKX_INPUT_TOTAL = 1_000_000;
+
 function getNativeBalanceChange(accountData, wallet) {
   if (!Array.isArray(accountData)) {
     return 0;
@@ -13,7 +22,11 @@ function getNativeBalanceChange(accountData, wallet) {
   return Number(item?.nativeBalanceChange ?? 0);
 }
 
-function getTokenBalanceChange(accountData, wallet, mint) {
+function getTokenBalanceChange(
+  accountData,
+  wallet,
+  mint
+) {
   if (!Array.isArray(accountData)) {
     return 0;
   }
@@ -21,7 +34,8 @@ function getTokenBalanceChange(accountData, wallet, mint) {
   let total = 0;
 
   for (const account of accountData) {
-    const changes = account?.tokenBalanceChanges;
+    const changes =
+      account?.tokenBalanceChanges;
 
     if (!Array.isArray(changes)) {
       continue;
@@ -42,13 +56,17 @@ function getTokenBalanceChange(accountData, wallet, mint) {
   return total;
 }
 
-function findNegativeTokenSource(accountData, mint) {
+function findNegativeTokenSource(
+  accountData,
+  mint
+) {
   if (!Array.isArray(accountData)) {
     return null;
   }
 
   for (const account of accountData) {
-    const changes = account?.tokenBalanceChanges;
+    const changes =
+      account?.tokenBalanceChanges;
 
     if (!Array.isArray(changes)) {
       continue;
@@ -64,12 +82,18 @@ function findNegativeTokenSource(accountData, mint) {
         amount < 0
       ) {
         return {
-          account: account?.account || null,
+          account:
+            account?.account || null,
+
           userAccount:
             change?.userAccount || null,
+
           tokenAccount:
             change?.tokenAccount || null,
-          rawTokenAmount: amount,
+
+          rawTokenAmount:
+            amount,
+
           decimals:
             Number(
               change?.rawTokenAmount?.decimals ?? 0
@@ -80,6 +104,169 @@ function findNegativeTokenSource(accountData, mint) {
   }
 
   return null;
+}
+
+function groupNativeTransfersBySender(
+  nativeTransfers
+) {
+  const groups = new Map();
+
+  if (!Array.isArray(nativeTransfers)) {
+    return groups;
+  }
+
+  for (const transfer of nativeTransfers) {
+    const sender =
+      transfer?.fromUserAccount;
+
+    const amount =
+      Number(transfer?.amount ?? 0);
+
+    if (!sender || amount <= 0) {
+      continue;
+    }
+
+    if (!groups.has(sender)) {
+      groups.set(sender, []);
+    }
+
+    groups.get(sender).push({
+      amount,
+      transfer,
+    });
+  }
+
+  return groups;
+}
+
+function findExactPattern(
+  amounts,
+  pattern
+) {
+  const remaining = [...amounts];
+
+  for (const required of pattern) {
+    const index =
+      remaining.indexOf(required);
+
+    if (index === -1) {
+      return false;
+    }
+
+    remaining.splice(index, 1);
+  }
+
+  return true;
+}
+
+function findOKXInputPattern(
+  nativeTransfers,
+  expectedFromUser
+) {
+  const groups =
+    groupNativeTransfersBySender(
+      nativeTransfers
+    );
+
+  for (const [
+    sender,
+    transfers,
+  ] of groups.entries()) {
+    const amounts =
+      transfers.map(
+        (item) => item.amount
+      );
+
+    const matched =
+      findExactPattern(
+        amounts,
+        OKX_INPUT_PATTERN
+      );
+
+    if (!matched) {
+      continue;
+    }
+
+    const matchedTransfers = [];
+
+    for (
+      const required
+      of OKX_INPUT_PATTERN
+    ) {
+      const item =
+        transfers.find(
+          (x) =>
+            x.amount === required &&
+            !matchedTransfers.includes(x)
+        );
+
+      if (item) {
+        matchedTransfers.push(item);
+      }
+    }
+
+    const total =
+      OKX_INPUT_PATTERN.reduce(
+        (sum, amount) =>
+          sum + amount,
+        0
+      );
+
+    const matchesTokenTransferUser =
+      sender === expectedFromUser;
+
+    return {
+      matched: true,
+
+      account: sender,
+
+      lamports: total,
+
+      sol:
+        total / 1_000_000_000,
+
+      components:
+        OKX_INPUT_PATTERN,
+
+      componentTransfers:
+        matchedTransfers.map(
+          (item) => item.transfer
+        ),
+
+      matchesTokenTransferUser,
+
+      confidence:
+        matchesTokenTransferUser
+          ? "VERY_HIGH"
+          : "HIGH",
+
+      reason:
+        matchesTokenTransferUser
+          ? "Exact repeated OKX 0.001 SOL input pattern detected and the payer matches tokenTransfers.fromUserAccount."
+          : "Exact repeated OKX 0.001 SOL input pattern detected; payer differs from token source user account.",
+    };
+  }
+
+  return {
+    matched: false,
+
+    account: null,
+
+    lamports: null,
+
+    sol: null,
+
+    components: [],
+
+    componentTransfers: [],
+
+    matchesTokenTransferUser: false,
+
+    confidence: "LOW",
+
+    reason:
+      "Known OKX 0.001 SOL input pattern was not found.",
+  };
 }
 
 function getNativeTransfersFromWallet(
@@ -117,13 +304,19 @@ function sumTransfers(transfers) {
 
   return transfers.reduce(
     (sum, transfer) =>
-      sum + Number(transfer?.amount ?? 0),
+      sum +
+      Number(
+        transfer?.amount ?? 0
+      ),
     0
   );
 }
 
 function lamportsToSol(lamports) {
-  return Number(lamports || 0) / 1_000_000_000;
+  return (
+    Number(lamports || 0) /
+    1_000_000_000
+  );
 }
 
 function rawAmountToToken(
@@ -132,111 +325,53 @@ function rawAmountToToken(
 ) {
   return (
     Number(rawAmount || 0) /
-    Math.pow(10, Number(decimals || 0))
+    Math.pow(
+      10,
+      Number(decimals || 0)
+    )
   );
 }
 
-function inferSwapInputSOL(
-  accountData,
-  nativeTransfers,
-  mint
-) {
-  /*
-   * We do NOT call this "actual spend".
-   * This is only an inferred amount based on
-   * the repeating OKX router pattern we've observed.
-   */
-
-  const source = findNegativeTokenSource(
-    accountData,
-    mint
-  );
-
-  if (!source) {
-    return {
-      valueSOL: null,
-      confidence: "LOW",
-      reason:
-        "No negative token source account found.",
-    };
-  }
-
-  const sourceWallet =
-    source.userAccount;
-
-  const outgoing =
-    getNativeTransfersFromWallet(
-      nativeTransfers,
-      sourceWallet
-    );
-
-  const outgoingLamports =
-    sumTransfers(outgoing);
-
-  /*
-   * In our repeated samples:
-   *
-   * 987654
-   * + 2963
-   * + 4691
-   * + 4692
-   * = 1,000,000 lamports
-   */
-
-  const outgoingSOL =
-    lamportsToSol(outgoingLamports);
-
-  let confidence = "LOW";
-  let reason =
-    "Pattern does not match known OKX 0.001 SOL structure.";
-
-  if (
-    outgoingLamports === 1_000_000
-  ) {
-    confidence = "HIGH";
-
-    reason =
-      "Source account sends exactly 0.001 SOL across the observed router transfer pattern.";
-  }
-
+function buildRoleAnalysis({
+  gakeNativeChange,
+  fromUser,
+  feePayer,
+  inference,
+  tokenSourceUserAccount,
+}) {
   return {
-    valueSOL:
-      outgoingLamports > 0
-        ? outgoingSOL
-        : null,
+    gakeReceivedToken: true,
 
-    confidence,
+    gakePaidSOL:
+      gakeNativeChange < 0,
 
-    reason,
-
-    sourceUserAccount:
-      sourceWallet,
-
-    sourceTokenAccount:
-      source.tokenAccount,
-
-    sourceRawTokenAmount:
-      source.rawTokenAmount,
-
-    sourceTokenAmount:
-      rawAmountToToken(
-        Math.abs(
-          source.rawTokenAmount
-        ),
-        source.decimals
+    gakeNativeBalanceChangeSOL:
+      lamportsToSol(
+        gakeNativeChange
       ),
 
-    sourceDecimals:
-      source.decimals,
+    tokenTransferFromUser:
+      fromUser || null,
 
-    sourceOutgoingLamports:
-      outgoingLamports,
+    inferredInputAccount:
+      inference.account || null,
 
-    sourceOutgoingSOL:
-      outgoingSOL,
+    tokenSourceUserAccount:
+      tokenSourceUserAccount || null,
 
-    sourceOutgoingTransfers:
-      outgoing,
+    feePayer:
+      feePayer || null,
+
+    inputAccountMatchesTokenTransfer:
+      inference.matchesTokenTransferUser,
+
+    inputAccountIsTokenSource:
+      inference.account ===
+      tokenSourceUserAccount,
+
+    inputAccountIsFeePayer:
+      inference.account ===
+      feePayer,
   };
 }
 
@@ -261,7 +396,10 @@ function buildSwapCandidate(tx) {
 
   const candidates = [];
 
-  for (const transfer of tokenTransfers) {
+  for (
+    const transfer
+    of tokenTransfers
+  ) {
     const mint =
       transfer?.mint || null;
 
@@ -275,6 +413,10 @@ function buildSwapCandidate(tx) {
     const toUser =
       transfer?.toUserAccount || "";
 
+    /*
+     * We only care about tokens
+     * entering Gake.
+     */
     if (
       toUser !== GAKE_WALLET ||
       fromUser === GAKE_WALLET
@@ -303,18 +445,46 @@ function buildSwapCandidate(tx) {
     const feePayer =
       tx?.feePayer || "";
 
+    const fee =
+      Number(tx?.fee ?? 0);
+
     const feePayerNativeChange =
       getNativeBalanceChange(
         accountData,
         feePayer
       );
 
+    /*
+     * IMPORTANT:
+     *
+     * Do NOT use the token source
+     * account as the SOL payer.
+     *
+     * We search nativeTransfers
+     * independently.
+     */
     const inference =
-      inferSwapInputSOL(
-        accountData,
+      findOKXInputPattern(
         nativeTransfers,
+        fromUser
+      );
+
+    const tokenSource =
+      findNegativeTokenSource(
+        accountData,
         mint
       );
+
+    const roleAnalysis =
+      buildRoleAnalysis({
+        gakeNativeChange,
+        fromUser,
+        feePayer,
+        inference,
+        tokenSourceUserAccount:
+          tokenSource?.userAccount ||
+          null,
+      });
 
     const candidate = {
       message:
@@ -350,6 +520,9 @@ function buildSwapCandidate(tx) {
       toUserAccount:
         toUser,
 
+      /*
+       * Gake's own balance change.
+       */
       gakeNativeBalanceChange:
         gakeNativeChange,
 
@@ -361,15 +534,15 @@ function buildSwapCandidate(tx) {
       gakeTokenRawBalanceChange:
         gakeTokenRawChange,
 
+      /*
+       * Transaction fee payer.
+       */
       feePayer,
 
-      fee:
-        Number(tx?.fee ?? 0),
+      fee,
 
       feeSOL:
-        lamportsToSol(
-          tx?.fee ?? 0
-        ),
+        lamportsToSol(fee),
 
       feePayerNativeBalanceChange:
         feePayerNativeChange,
@@ -379,41 +552,80 @@ function buildSwapCandidate(tx) {
           feePayerNativeChange
         ),
 
+      /*
+       * Inferred economic input.
+       */
+      inferredInputAccount:
+        inference.account,
+
       inferredSwapInputSOL:
-        inference.valueSOL,
+        inference.sol,
+
+      inferredSwapInputLamports:
+        inference.lamports,
+
+      inferredInputConfidence:
+        inference.confidence,
 
       inferenceReason:
         inference.reason,
 
+      inputPatternMatched:
+        inference.matched,
+
+      inputPatternComponents:
+        inference.components,
+
+      inputPatternTotalLamports:
+        inference.lamports,
+
+      inputPatternComponentTransfers:
+        inference.componentTransfers,
+
+      inputAccountMatchesTokenTransfer:
+        inference.matchesTokenTransferUser,
+
+      /*
+       * Token source is kept separate.
+       */
       tokenSourceUserAccount:
-        inference.sourceUserAccount ||
+        tokenSource?.userAccount ||
         null,
 
       tokenSourceTokenAccount:
-        inference.sourceTokenAccount ||
+        tokenSource?.tokenAccount ||
+        null,
+
+      tokenSourceRawTokenAmount:
+        tokenSource?.rawTokenAmount ||
         null,
 
       tokenSourceTokenAmount:
-        inference.sourceTokenAmount ||
-        null,
+        tokenSource
+          ? rawAmountToToken(
+              Math.abs(
+                tokenSource.rawTokenAmount
+              ),
+              tokenSource.decimals
+            )
+          : null,
 
-      tokenSourceOutgoingSOL:
-        inference.sourceOutgoingSOL ||
+      tokenSourceDecimals:
+        tokenSource?.decimals ??
         null,
-
-      tokenSourceOutgoingLamports:
-        inference.sourceOutgoingLamports ||
-        null,
-
-      tokenSourceOutgoingTransfers:
-        inference.sourceOutgoingTransfers ||
-        [],
 
       /*
-       * IMPORTANT:
-       * We now capture these fields so we can inspect
-       * the actual instruction/event structure later.
+       * Role analysis.
        */
+      roleAnalysis,
+
+      /*
+       * All raw transfer data
+       * remains available.
+       */
+      nativeTransfers,
+
+      accountData,
 
       events:
         tx?.events ?? null,
@@ -423,10 +635,6 @@ function buildSwapCandidate(tx) {
 
       transactionError:
         tx?.transactionError ?? null,
-
-      nativeTransfers,
-
-      accountData,
     };
 
     candidates.push(candidate);
@@ -436,8 +644,14 @@ function buildSwapCandidate(tx) {
 }
 
 export default {
-  async fetch(request, env, ctx) {
-    if (request.method !== "POST") {
+  async fetch(
+    request,
+    env,
+    ctx
+  ) {
+    if (
+      request.method !== "POST"
+    ) {
       return new Response(
         "Gake Trader Bot is running",
         {
@@ -455,26 +669,38 @@ export default {
           ? body
           : [body];
 
-      for (const tx of events) {
-        if (tx?.type !== "SWAP") {
+      for (
+        const tx
+        of events
+      ) {
+        if (
+          tx?.type !== "SWAP"
+        ) {
           continue;
         }
 
         const candidates =
           buildSwapCandidate(tx);
 
-        for (const candidate of candidates) {
-          console.log(candidate);
+        for (
+          const candidate
+          of candidates
+        ) {
+          console.log(
+            candidate
+          );
         }
       }
 
       return new Response(
         JSON.stringify({
           ok: true,
-          received: events.length,
+          received:
+            events.length,
         }),
         {
           status: 200,
+
           headers: {
             "content-type":
               "application/json",
@@ -490,10 +716,12 @@ export default {
       return new Response(
         JSON.stringify({
           ok: false,
-          error: String(error),
+          error:
+            String(error),
         }),
         {
           status: 400,
+
           headers: {
             "content-type":
               "application/json",
