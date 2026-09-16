@@ -11,15 +11,22 @@ const OKX_INPUT_PATTERN = [
 const OKX_INPUT_TOTAL = 1_000_000;
 
 /*
- * Temporary in-memory deduplication.
+ * Temporary in-memory storage.
  *
- * IMPORTANT:
- * This is only for the current Worker instance.
- * It is NOT a permanent database.
+ * This is NOT permanent storage.
+ * We will later move Paper positions
+ * to Cloudflare KV or D1.
  */
+
 const processedSignatures = new Set();
 
-function getNativeBalanceChange(accountData, wallet) {
+const paperPositions = new Map();
+
+
+function getNativeBalanceChange(
+  accountData,
+  wallet
+) {
   if (!Array.isArray(accountData)) {
     return 0;
   }
@@ -32,6 +39,7 @@ function getNativeBalanceChange(accountData, wallet) {
     item?.nativeBalanceChange ?? 0
   );
 }
+
 
 function getTokenBalanceChange(
   accountData,
@@ -67,6 +75,7 @@ function getTokenBalanceChange(
   return total;
 }
 
+
 function findNegativeTokenSource(
   accountData,
   mint
@@ -84,9 +93,10 @@ function findNegativeTokenSource(
     }
 
     for (const change of changes) {
-      const amount = Number(
-        change?.rawTokenAmount?.tokenAmount ?? 0
-      );
+      const amount =
+        Number(
+          change?.rawTokenAmount?.tokenAmount ?? 0
+        );
 
       if (
         change?.mint === mint &&
@@ -117,6 +127,7 @@ function findNegativeTokenSource(
   return null;
 }
 
+
 function groupNativeTransfersBySender(
   nativeTransfers
 ) {
@@ -131,9 +142,14 @@ function groupNativeTransfersBySender(
       transfer?.fromUserAccount;
 
     const amount =
-      Number(transfer?.amount ?? 0);
+      Number(
+        transfer?.amount ?? 0
+      );
 
-    if (!sender || amount <= 0) {
+    if (
+      !sender ||
+      amount <= 0
+    ) {
       continue;
     }
 
@@ -150,25 +166,37 @@ function groupNativeTransfersBySender(
   return groups;
 }
 
+
 function findExactPattern(
   amounts,
   pattern
 ) {
-  const remaining = [...amounts];
+  const remaining = [
+    ...amounts,
+  ];
 
-  for (const required of pattern) {
+  for (
+    const required
+    of pattern
+  ) {
     const index =
-      remaining.indexOf(required);
+      remaining.indexOf(
+        required
+      );
 
     if (index === -1) {
       return false;
     }
 
-    remaining.splice(index, 1);
+    remaining.splice(
+      index,
+      1
+    );
   }
 
   return true;
 }
+
 
 function findOKXInputPattern(
   nativeTransfers,
@@ -179,13 +207,17 @@ function findOKXInputPattern(
       nativeTransfers
     );
 
-  for (const [
-    sender,
-    transfers,
-  ] of groups.entries()) {
+  for (
+    const [
+      sender,
+      transfers,
+    ]
+    of groups.entries()
+  ) {
     const amounts =
       transfers.map(
-        (item) => item.amount
+        (item) =>
+          item.amount
       );
 
     const matched =
@@ -198,7 +230,8 @@ function findOKXInputPattern(
       continue;
     }
 
-    const matchedTransfers = [];
+    const matchedTransfers =
+      [];
 
     for (
       const required
@@ -212,7 +245,9 @@ function findOKXInputPattern(
         );
 
       if (item) {
-        matchedTransfers.push(item);
+        matchedTransfers.push(
+          item
+        );
       }
     }
 
@@ -229,19 +264,23 @@ function findOKXInputPattern(
     return {
       matched: true,
 
-      account: sender,
+      account:
+        sender,
 
-      lamports: total,
+      lamports:
+        total,
 
       sol:
-        total / 1_000_000_000,
+        total /
+        1_000_000_000,
 
       components:
         OKX_INPUT_PATTERN,
 
       componentTransfers:
         matchedTransfers.map(
-          (item) => item.transfer
+          (item) =>
+            item.transfer
         ),
 
       matchesTokenTransferUser,
@@ -271,34 +310,47 @@ function findOKXInputPattern(
 
     componentTransfers: [],
 
-    matchesTokenTransferUser: false,
+    matchesTokenTransferUser:
+      false,
 
-    confidence: "LOW",
+    confidence:
+      "LOW",
 
     reason:
       "Known OKX 0.001 SOL input pattern was not found.",
   };
 }
 
-function lamportsToSol(lamports) {
+
+function lamportsToSol(
+  lamports
+) {
   return (
-    Number(lamports || 0) /
+    Number(
+      lamports || 0
+    ) /
     1_000_000_000
   );
 }
+
 
 function rawAmountToToken(
   rawAmount,
   decimals
 ) {
   return (
-    Number(rawAmount || 0) /
+    Number(
+      rawAmount || 0
+    ) /
     Math.pow(
       10,
-      Number(decimals || 0)
+      Number(
+        decimals || 0
+      )
     )
   );
 }
+
 
 function buildRoleAnalysis({
   gakeNativeChange,
@@ -308,7 +360,8 @@ function buildRoleAnalysis({
   tokenSourceUserAccount,
 }) {
   return {
-    gakeReceivedToken: true,
+    gakeReceivedToken:
+      true,
 
     gakePaidSOL:
       gakeNativeChange < 0,
@@ -322,13 +375,16 @@ function buildRoleAnalysis({
       fromUser || null,
 
     inferredInputAccount:
-      inference.account || null,
+      inference.account ||
+      null,
 
     tokenSourceUserAccount:
-      tokenSourceUserAccount || null,
+      tokenSourceUserAccount ||
+      null,
 
     feePayer:
-      feePayer || null,
+      feePayer ||
+      null,
 
     inputAccountMatchesTokenTransfer:
       inference.matchesTokenTransferUser,
@@ -343,15 +399,16 @@ function buildRoleAnalysis({
   };
 }
 
+
 /*
- * This is the important new function.
+ * Convert a validated candidate
+ * into a BUY_SIGNAL.
  *
- * It converts only a HIGH-CONFIDENCE,
- * successful OKX candidate into a BUY_SIGNAL.
- *
- * NO TRADE IS EXECUTED.
+ * NO REAL TRADE.
  */
-function buildBuySignal(candidate) {
+function buildBuySignal(
+  candidate
+) {
   if (!candidate) {
     return null;
   }
@@ -408,7 +465,9 @@ function buildBuySignal(candidate) {
 
   if (
     !candidate.mint ||
-    Number(candidate.tokenAmount) <= 0
+    Number(
+      candidate.tokenAmount
+    ) <= 0
   ) {
     return null;
   }
@@ -470,22 +529,151 @@ function buildBuySignal(candidate) {
   };
 }
 
-function buildSwapCandidate(tx) {
+
+/*
+ * NEW:
+ *
+ * Create a Paper Trading position.
+ *
+ * Still NO blockchain transaction.
+ */
+function createPaperBuy(
+  buySignal
+) {
+  if (!buySignal) {
+    return null;
+  }
+
+  const {
+    signature,
+    mint,
+    tokenAmount,
+    inputSOL,
+  } = buySignal;
+
+  /*
+   * Safety checks.
+   */
+  if (!signature) {
+    return null;
+  }
+
+  if (!mint) {
+    return null;
+  }
+
+  if (
+    Number(tokenAmount) <= 0
+  ) {
+    return null;
+  }
+
+  if (
+    Number(inputSOL) <= 0
+  ) {
+    return null;
+  }
+
+  /*
+   * Do not open the same
+   * signature twice.
+   */
+  if (
+    paperPositions.has(
+      signature
+    )
+  ) {
+    console.log({
+      message:
+        "♻️ PAPER POSITION ALREADY EXISTS",
+
+      signature,
+
+      mint,
+    });
+
+    return null;
+  }
+
+  const entryPriceSOLPerToken =
+    Number(inputSOL) /
+    Number(tokenAmount);
+
+  const position = {
+    message:
+      "📄 PAPER BUY",
+
+    action:
+      "PAPER_BUY",
+
+    status:
+      "PAPER_OPEN",
+
+    signature,
+
+    mint,
+
+    tokenAmount:
+      Number(tokenAmount),
+
+    inputSOL:
+      Number(inputSOL),
+
+    entryPriceSOLPerToken,
+
+    entryTime:
+      new Date().toISOString(),
+
+    source:
+      buySignal.source,
+
+    inputAccount:
+      buySignal.inputAccount,
+
+    confidence:
+      buySignal.confidence,
+
+    execution:
+      "DISABLED",
+
+    realMoney:
+      false,
+  };
+
+  paperPositions.set(
+    signature,
+    position
+  );
+
+  return position;
+}
+
+
+function buildSwapCandidate(
+  tx
+) {
   const signature =
-    tx?.signature || "N/A";
+    tx?.signature ||
+    "N/A";
 
   const accountData =
-    Array.isArray(tx?.accountData)
+    Array.isArray(
+      tx?.accountData
+    )
       ? tx.accountData
       : [];
 
   const nativeTransfers =
-    Array.isArray(tx?.nativeTransfers)
+    Array.isArray(
+      tx?.nativeTransfers
+    )
       ? tx.nativeTransfers
       : [];
 
   const tokenTransfers =
-    Array.isArray(tx?.tokenTransfers)
+    Array.isArray(
+      tx?.tokenTransfers
+    )
       ? tx.tokenTransfers
       : [];
 
@@ -496,31 +684,37 @@ function buildSwapCandidate(tx) {
     of tokenTransfers
   ) {
     const mint =
-      transfer?.mint || null;
+      transfer?.mint ||
+      null;
 
     if (!mint) {
       continue;
     }
 
     const fromUser =
-      transfer?.fromUserAccount || "";
+      transfer?.fromUserAccount ||
+      "";
 
     const toUser =
-      transfer?.toUserAccount || "";
+      transfer?.toUserAccount ||
+      "";
 
     /*
      * Only tokens entering Gake.
      */
     if (
-      toUser !== GAKE_WALLET ||
-      fromUser === GAKE_WALLET
+      toUser !==
+        GAKE_WALLET ||
+      fromUser ===
+        GAKE_WALLET
     ) {
       continue;
     }
 
     const tokenAmount =
       Number(
-        transfer?.tokenAmount ?? 0
+        transfer?.tokenAmount ??
+        0
       );
 
     const gakeNativeChange =
@@ -537,10 +731,13 @@ function buildSwapCandidate(tx) {
       );
 
     const feePayer =
-      tx?.feePayer || "";
+      tx?.feePayer ||
+      "";
 
     const fee =
-      Number(tx?.fee ?? 0);
+      Number(
+        tx?.fee ?? 0
+      );
 
     const feePayerNativeChange =
       getNativeBalanceChange(
@@ -548,10 +745,6 @@ function buildSwapCandidate(tx) {
         feePayer
       );
 
-    /*
-     * Do NOT use token source
-     * as SOL payer.
-     */
     const inference =
       findOKXInputPattern(
         nativeTransfers,
@@ -570,6 +763,7 @@ function buildSwapCandidate(tx) {
         fromUser,
         feePayer,
         inference,
+
         tokenSourceUserAccount:
           tokenSource?.userAccount ||
           null,
@@ -591,13 +785,16 @@ function buildSwapCandidate(tx) {
       signature,
 
       source:
-        tx?.source || "N/A",
+        tx?.source ||
+        "N/A",
 
       type:
-        tx?.type || "N/A",
+        tx?.type ||
+        "N/A",
 
       description:
-        tx?.description || "N/A",
+        tx?.description ||
+        "N/A",
 
       mint,
 
@@ -625,7 +822,9 @@ function buildSwapCandidate(tx) {
       fee,
 
       feeSOL:
-        lamportsToSol(fee),
+        lamportsToSol(
+          fee
+        ),
 
       feePayerNativeBalanceChange:
         feePayerNativeChange,
@@ -698,20 +897,26 @@ function buildSwapCandidate(tx) {
       accountData,
 
       events:
-        tx?.events ?? null,
+        tx?.events ??
+        null,
 
       instructions:
-        tx?.instructions ?? [],
+        tx?.instructions ??
+        [],
 
       transactionError:
-        tx?.transactionError ?? null,
+        tx?.transactionError ??
+        null,
     };
 
-    candidates.push(candidate);
+    candidates.push(
+      candidate
+    );
   }
 
   return candidates;
 }
+
 
 export default {
   async fetch(
@@ -720,7 +925,8 @@ export default {
     ctx
   ) {
     if (
-      request.method !== "POST"
+      request.method !==
+      "POST"
     ) {
       return new Response(
         "Gake Trader Bot is running",
@@ -744,7 +950,8 @@ export default {
         of events
       ) {
         if (
-          tx?.type !== "SWAP"
+          tx?.type !==
+          "SWAP"
         ) {
           continue;
         }
@@ -752,10 +959,6 @@ export default {
         const signature =
           tx?.signature;
 
-        /*
-         * Ignore malformed events
-         * without a signature.
-         */
         if (!signature) {
           console.log(
             "⚠️ SWAP WITHOUT SIGNATURE"
@@ -765,8 +968,7 @@ export default {
         }
 
         /*
-         * Deduplicate this signature
-         * during the current Worker instance.
+         * Webhook deduplication.
          */
         if (
           processedSignatures.has(
@@ -788,33 +990,55 @@ export default {
         );
 
         const candidates =
-          buildSwapCandidate(tx);
+          buildSwapCandidate(
+            tx
+          );
 
         for (
           const candidate
           of candidates
         ) {
           /*
-           * Keep the complete diagnostic
-           * candidate in the logs.
+           * Keep diagnostic data.
            */
           console.log(
             candidate
           );
 
           /*
-           * Build BUY_SIGNAL.
-           *
-           * This still does NOT trade.
+           * Build validated BUY signal.
            */
           const buySignal =
             buildBuySignal(
               candidate
             );
 
-          if (buySignal) {
-            console.log(
+          if (!buySignal) {
+            continue;
+          }
+
+          /*
+           * BUY SIGNAL.
+           *
+           * STILL NO REAL TRADE.
+           */
+          console.log(
+            buySignal
+          );
+
+          /*
+           * PAPER BUY.
+           *
+           * STILL NO REAL TRADE.
+           */
+          const paperBuy =
+            createPaperBuy(
               buySignal
+            );
+
+          if (paperBuy) {
+            console.log(
+              paperBuy
             );
           }
         }
