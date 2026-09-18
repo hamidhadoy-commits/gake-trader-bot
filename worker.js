@@ -1,5 +1,4 @@
-const GAKE_WALLET =
-  "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
+const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 
 const OKX_INPUT_PATTERN = [
   987654,
@@ -10,156 +9,101 @@ const OKX_INPUT_PATTERN = [
 
 const OKX_INPUT_TOTAL = 1_000_000;
 
-/*
- * Temporary in-memory storage.
- *
- * This is NOT permanent storage.
- * We will later move Paper positions
- * to Cloudflare KV or D1.
- */
-
+// فقط برای تست.
+// با restart شدن Worker ممکن است پاک شود.
 const processedSignatures = new Set();
-
 const paperPositions = new Map();
 
 
-function getNativeBalanceChange(
-  accountData,
-  wallet
-) {
-  if (!Array.isArray(accountData)) {
-    return 0;
-  }
-
-  const item = accountData.find(
-    (x) => x?.account === wallet
-  );
-
-  return Number(
-    item?.nativeBalanceChange ?? 0
-  );
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+    },
+  });
 }
 
 
-function getTokenBalanceChange(
-  accountData,
-  wallet,
-  mint
-) {
-  if (!Array.isArray(accountData)) {
-    return 0;
-  }
-
-  let total = 0;
-
-  for (const account of accountData) {
-    const changes =
-      account?.tokenBalanceChanges;
-
-    if (!Array.isArray(changes)) {
-      continue;
-    }
-
-    for (const change of changes) {
-      if (
-        change?.userAccount === wallet &&
-        change?.mint === mint
-      ) {
-        total += Number(
-          change?.rawTokenAmount?.tokenAmount ?? 0
-        );
-      }
-    }
-  }
-
-  return total;
+function lamportsToSOL(value) {
+  return Number(value || 0) / 1_000_000_000;
 }
 
 
-function findNegativeTokenSource(
-  accountData,
-  mint
-) {
-  if (!Array.isArray(accountData)) {
+function normalizeTransactions(body) {
+  if (Array.isArray(body)) {
+    return body;
+  }
+
+  if (body && typeof body === "object") {
+    return [body];
+  }
+
+  return [];
+}
+
+
+function getGakeNativeBalanceChange(tx) {
+  const rows = Array.isArray(tx?.accountData)
+    ? tx.accountData
+    : [];
+
+  const item = rows.find(
+    (row) => row?.account === GAKE_WALLET
+  );
+
+  return Number(item?.nativeBalanceChange || 0);
+}
+
+
+function findGakeReceivedToken(tx) {
+  const transfers = Array.isArray(tx?.tokenTransfers)
+    ? tx.tokenTransfers
+    : [];
+
+  const candidates = transfers.filter((transfer) => {
+    return (
+      transfer?.toUserAccount === GAKE_WALLET &&
+      transfer?.mint &&
+      Number(transfer?.tokenAmount || 0) > 0
+    );
+  });
+
+  if (!candidates.length) {
     return null;
   }
 
-  for (const account of accountData) {
-    const changes =
-      account?.tokenBalanceChanges;
+  // فعلاً بزرگ‌ترین دریافت توکن را انتخاب می‌کنیم.
+  candidates.sort(
+    (a, b) =>
+      Number(b?.tokenAmount || 0) -
+      Number(a?.tokenAmount || 0)
+  );
 
-    if (!Array.isArray(changes)) {
-      continue;
-    }
-
-    for (const change of changes) {
-      const amount =
-        Number(
-          change?.rawTokenAmount?.tokenAmount ?? 0
-        );
-
-      if (
-        change?.mint === mint &&
-        amount < 0
-      ) {
-        return {
-          account:
-            account?.account || null,
-
-          userAccount:
-            change?.userAccount || null,
-
-          tokenAccount:
-            change?.tokenAccount || null,
-
-          rawTokenAmount:
-            amount,
-
-          decimals:
-            Number(
-              change?.rawTokenAmount?.decimals ?? 0
-            ),
-        };
-      }
-    }
-  }
-
-  return null;
+  return candidates[0];
 }
 
 
-function groupNativeTransfersBySender(
-  nativeTransfers
-) {
+function groupNativeTransfersBySender(tx) {
+  const transfers = Array.isArray(tx?.nativeTransfers)
+    ? tx.nativeTransfers
+    : [];
+
   const groups = new Map();
 
-  if (!Array.isArray(nativeTransfers)) {
-    return groups;
-  }
+  for (const transfer of transfers) {
+    const sender = transfer?.fromUserAccount;
 
-  for (const transfer of nativeTransfers) {
-    const sender =
-      transfer?.fromUserAccount;
-
-    const amount =
-      Number(
-        transfer?.amount ?? 0
-      );
-
-    if (
-      !sender ||
-      amount <= 0
-    ) {
-      continue;
-    }
+    if (!sender) continue;
 
     if (!groups.has(sender)) {
       groups.set(sender, []);
     }
 
     groups.get(sender).push({
-      amount,
-      transfer,
+      fromUserAccount: sender,
+      toUserAccount: transfer?.toUserAccount || null,
+      amount: Number(transfer?.amount || 0),
     });
   }
 
@@ -167,283 +111,194 @@ function groupNativeTransfersBySender(
 }
 
 
-function findExactPattern(
-  amounts,
-  pattern
-) {
-  const remaining = [
-    ...amounts,
-  ];
+function matchesExactInputPattern(transfers) {
+  if (!Array.isArray(transfers)) {
+    return false;
+  }
 
-  for (
-    const required
-    of pattern
-  ) {
-    const index =
-      remaining.indexOf(
-        required
-      );
+  const amounts = transfers.map((x) =>
+    Number(x?.amount || 0)
+  );
+
+  // لازم نیست تنها انتقال‌های فرستنده همین ۴ عدد باشند.
+  // کافی است هر چهار جزء pattern وجود داشته باشند.
+  const remaining = [...amounts];
+
+  for (const target of OKX_INPUT_PATTERN) {
+    const index = remaining.indexOf(target);
 
     if (index === -1) {
       return false;
     }
 
-    remaining.splice(
-      index,
-      1
-    );
+    remaining.splice(index, 1);
   }
 
   return true;
 }
 
 
-function findOKXInputPattern(
-  nativeTransfers,
-  expectedFromUser
-) {
-  const groups =
-    groupNativeTransfersBySender(
-      nativeTransfers
-    );
+function findOKXInputAccount(tx) {
+  const groups = groupNativeTransfersBySender(tx);
 
-  for (
-    const [
-      sender,
-      transfers,
-    ]
-    of groups.entries()
-  ) {
-    const amounts =
-      transfers.map(
-        (item) =>
-          item.amount
-      );
-
-    const matched =
-      findExactPattern(
-        amounts,
-        OKX_INPUT_PATTERN
-      );
-
-    if (!matched) {
+  for (const [sender, transfers] of groups.entries()) {
+    if (!matchesExactInputPattern(transfers)) {
       continue;
     }
 
-    const matchedTransfers =
-      [];
-
-    for (
-      const required
-      of OKX_INPUT_PATTERN
-    ) {
-      const item =
-        transfers.find(
-          (x) =>
-            x.amount === required &&
-            !matchedTransfers.includes(x)
-        );
-
-      if (item) {
-        matchedTransfers.push(
-          item
-        );
-      }
-    }
-
-    const total =
-      OKX_INPUT_PATTERN.reduce(
-        (sum, amount) =>
-          sum + amount,
-        0
-      );
-
-    const matchesTokenTransferUser =
-      sender === expectedFromUser;
-
     return {
-      matched: true,
-
-      account:
-        sender,
-
-      lamports:
-        total,
-
-      sol:
-        total /
-        1_000_000_000,
-
-      components:
-        OKX_INPUT_PATTERN,
-
-      componentTransfers:
-        matchedTransfers.map(
-          (item) =>
-            item.transfer
-        ),
-
-      matchesTokenTransferUser,
-
-      confidence:
-        matchesTokenTransferUser
-          ? "VERY_HIGH"
-          : "HIGH",
-
-      reason:
-        matchesTokenTransferUser
-          ? "Exact repeated OKX 0.001 SOL input pattern detected and the payer matches tokenTransfers.fromUserAccount."
-          : "Exact repeated OKX 0.001 SOL input pattern detected; payer differs from token source user account.",
+      inputAccount: sender,
+      confidence: "VERY_HIGH",
+      inputLamports: OKX_INPUT_TOTAL,
+      inputSOL: lamportsToSOL(OKX_INPUT_TOTAL),
+      components: OKX_INPUT_PATTERN,
+      transfers,
     };
   }
 
+  return null;
+}
+
+
+function getFeePayerNativeBalanceChange(tx) {
+  const feePayer = tx?.feePayer;
+
+  if (!feePayer) return 0;
+
+  const rows = Array.isArray(tx?.accountData)
+    ? tx.accountData
+    : [];
+
+  const item = rows.find(
+    (row) => row?.account === feePayer
+  );
+
+  return Number(item?.nativeBalanceChange || 0);
+}
+
+
+function buildSwapCandidate(tx) {
+  const received = findGakeReceivedToken(tx);
+
+  if (!received) {
+    return null;
+  }
+
+  const input = findOKXInputAccount(tx);
+
+  if (!input) {
+    return null;
+  }
+
+  const fromUserAccount =
+    received?.fromUserAccount || null;
+
+  const inputMatchesTokenTransfer =
+    input.inputAccount === fromUserAccount;
+
+  const gakeNativeBalanceChange =
+    getGakeNativeBalanceChange(tx);
+
+  const feePayerNativeBalanceChange =
+    getFeePayerNativeBalanceChange(tx);
+
   return {
-    matched: false,
-
-    account: null,
-
-    lamports: null,
-
-    sol: null,
-
-    components: [],
-
-    componentTransfers: [],
-
-    matchesTokenTransferUser:
-      false,
+    message: "🔎 SWAP CANDIDATE",
+    action: "SWAP_CANDIDATE",
 
     confidence:
-      "LOW",
+      inputMatchesTokenTransfer
+        ? "VERY_HIGH"
+        : "HIGH",
 
-    reason:
-      "Known OKX 0.001 SOL input pattern was not found.",
-  };
-}
+    signature: tx?.signature || null,
+    source: tx?.source || null,
+    type: tx?.type || null,
 
+    mint: received?.mint || null,
+    tokenAmount: Number(
+      received?.tokenAmount || 0
+    ),
 
-function lamportsToSol(
-  lamports
-) {
-  return (
-    Number(
-      lamports || 0
-    ) /
-    1_000_000_000
-  );
-}
+    fromUserAccount,
+    toUserAccount:
+      received?.toUserAccount || null,
 
+    wallet: GAKE_WALLET,
 
-function rawAmountToToken(
-  rawAmount,
-  decimals
-) {
-  return (
-    Number(
-      rawAmount || 0
-    ) /
-    Math.pow(
-      10,
-      Number(
-        decimals || 0
-      )
-    )
-  );
-}
-
-
-function buildRoleAnalysis({
-  gakeNativeChange,
-  fromUser,
-  feePayer,
-  inference,
-  tokenSourceUserAccount,
-}) {
-  return {
-    gakeReceivedToken:
-      true,
-
-    gakePaidSOL:
-      gakeNativeChange < 0,
-
-    gakeNativeBalanceChangeSOL:
-      lamportsToSol(
-        gakeNativeChange
-      ),
-
-    tokenTransferFromUser:
-      fromUser || null,
+    feePayer: tx?.feePayer || null,
 
     inferredInputAccount:
-      inference.account ||
-      null,
+      input.inputAccount,
 
-    tokenSourceUserAccount:
-      tokenSourceUserAccount ||
-      null,
+    inferredInputConfidence:
+      input.confidence,
 
-    feePayer:
-      feePayer ||
-      null,
+    inferredSwapInputSOL:
+      input.inputSOL,
+
+    inferredSwapInputLamports:
+      input.inputLamports,
+
+    inputPatternMatched: true,
+
+    inputPatternComponents:
+      input.components,
+
+    inputPatternTotalLamports:
+      OKX_INPUT_TOTAL,
 
     inputAccountMatchesTokenTransfer:
-      inference.matchesTokenTransferUser,
+      inputMatchesTokenTransfer,
 
-    inputAccountIsTokenSource:
-      inference.account ===
-      tokenSourceUserAccount,
+    gakeNativeBalanceChangeSOL:
+      lamportsToSOL(
+        gakeNativeBalanceChange
+      ),
 
-    inputAccountIsFeePayer:
-      inference.account ===
-      feePayer,
+    fee: Number(tx?.fee || 0),
+
+    feeSOL:
+      lamportsToSOL(tx?.fee || 0),
+
+    feePayerNativeBalanceChangeSOL:
+      lamportsToSOL(
+        feePayerNativeBalanceChange
+      ),
+
+    transactionError:
+      tx?.transactionError ?? null,
+
+    description:
+      tx?.description || null,
+
+    timestamp:
+      tx?.timestamp || null,
   };
 }
 
 
-/*
- * Convert a validated candidate
- * into a BUY_SIGNAL.
- *
- * NO REAL TRADE.
- */
-function buildBuySignal(
-  candidate
-) {
+function buildBuySignal(candidate) {
   if (!candidate) {
     return null;
   }
 
+  // خطای تراکنش نباید وجود داشته باشد.
   if (
-    candidate.source !==
-    "OKX_DEX_ROUTER"
+    candidate.transactionError !== null &&
+    candidate.transactionError !== undefined
   ) {
     return null;
   }
 
   if (
-    candidate.type !==
-    "SWAP"
+    candidate.inputPatternMatched !== true
   ) {
     return null;
   }
 
   if (
-    candidate.transactionError !==
-    null
-  ) {
-    return null;
-  }
-
-  if (
-    candidate.inputPatternMatched !==
-    true
-  ) {
-    return null;
-  }
-
-  if (
-    candidate.inputAccountMatchesTokenTransfer !==
-    true
+    candidate.inputAccountMatchesTokenTransfer !== true
   ) {
     return null;
   }
@@ -456,31 +311,27 @@ function buildBuySignal(
   }
 
   if (
-    Number(
-      candidate.inferredSwapInputSOL
-    ) !== 0.001
+    Number(candidate.inferredSwapInputLamports) !==
+    OKX_INPUT_TOTAL
   ) {
     return null;
   }
 
+  if (!candidate.mint) {
+    return null;
+  }
+
   if (
-    !candidate.mint ||
-    Number(
-      candidate.tokenAmount
-    ) <= 0
+    Number(candidate.tokenAmount) <= 0
   ) {
     return null;
   }
 
   return {
-    message:
-      "🟢 BUY SIGNAL",
+    message: "🟢 BUY SIGNAL",
+    action: "BUY_SIGNAL",
 
-    action:
-      "BUY_SIGNAL",
-
-    confidence:
-      "VERY_HIGH",
+    confidence: "VERY_HIGH",
 
     signature:
       candidate.signature,
@@ -488,20 +339,27 @@ function buildBuySignal(
     source:
       candidate.source,
 
+    type:
+      candidate.type,
+
     mint:
       candidate.mint,
 
     tokenAmount:
-      candidate.tokenAmount,
+      Number(candidate.tokenAmount),
 
     inputAccount:
       candidate.inferredInputAccount,
 
     inputSOL:
-      candidate.inferredSwapInputSOL,
+      Number(
+        candidate.inferredSwapInputSOL
+      ),
 
     inputLamports:
-      candidate.inferredSwapInputLamports,
+      Number(
+        candidate.inferredSwapInputLamports
+      ),
 
     fromUserAccount:
       candidate.fromUserAccount,
@@ -516,30 +374,22 @@ function buildBuySignal(
       candidate.feePayer,
 
     feeSOL:
-      candidate.feeSOL,
+      Number(candidate.feeSOL || 0),
 
     gakeNativeBalanceChangeSOL:
-      candidate.gakeNativeBalanceChangeSOL,
+      Number(
+        candidate.gakeNativeBalanceChangeSOL || 0
+      ),
 
     detectedAt:
       new Date().toISOString(),
 
-    execution:
-      "DISABLED",
+    execution: "DISABLED",
   };
 }
 
 
-/*
- * NEW:
- *
- * Create a Paper Trading position.
- *
- * Still NO blockchain transaction.
- */
-function createPaperBuy(
-  buySignal
-) {
+function createPaperBuy(buySignal) {
   if (!buySignal) {
     return null;
   }
@@ -551,44 +401,22 @@ function createPaperBuy(
     inputSOL,
   } = buySignal;
 
-  /*
-   * Safety checks.
-   */
-  if (!signature) {
-    return null;
-  }
-
-  if (!mint) {
-    return null;
-  }
-
   if (
-    Number(tokenAmount) <= 0
-  ) {
-    return null;
-  }
-
-  if (
+    !signature ||
+    !mint ||
+    Number(tokenAmount) <= 0 ||
     Number(inputSOL) <= 0
   ) {
     return null;
   }
 
-  /*
-   * Do not open the same
-   * signature twice.
-   */
   if (
-    paperPositions.has(
-      signature
-    )
+    paperPositions.has(signature)
   ) {
     console.log({
       message:
         "♻️ PAPER POSITION ALREADY EXISTS",
-
       signature,
-
       mint,
     });
 
@@ -600,17 +428,12 @@ function createPaperBuy(
     Number(tokenAmount);
 
   const position = {
-    message:
-      "📄 PAPER BUY",
+    message: "📄 PAPER BUY",
+    action: "PAPER_BUY",
 
-    action:
-      "PAPER_BUY",
-
-    status:
-      "PAPER_OPEN",
+    status: "PAPER_OPEN",
 
     signature,
-
     mint,
 
     tokenAmount:
@@ -633,11 +456,8 @@ function createPaperBuy(
     confidence:
       buySignal.confidence,
 
-    execution:
-      "DISABLED",
-
-    realMoney:
-      false,
+    execution: "DISABLED",
+    realMoney: false,
   };
 
   paperPositions.set(
@@ -649,439 +469,221 @@ function createPaperBuy(
 }
 
 
-function buildSwapCandidate(
-  tx
-) {
-  const signature =
-    tx?.signature ||
-    "N/A";
+async function handleWebhook(request) {
+  let body;
 
-  const accountData =
-    Array.isArray(
-      tx?.accountData
-    )
-      ? tx.accountData
-      : [];
+  try {
+    body = await request.json();
+  } catch (error) {
+    console.error({
+      message: "❌ INVALID JSON",
+      error: String(error),
+    });
 
-  const nativeTransfers =
-    Array.isArray(
-      tx?.nativeTransfers
-    )
-      ? tx.nativeTransfers
-      : [];
-
-  const tokenTransfers =
-    Array.isArray(
-      tx?.tokenTransfers
-    )
-      ? tx.tokenTransfers
-      : [];
-
-  const candidates = [];
-
-  for (
-    const transfer
-    of tokenTransfers
-  ) {
-    const mint =
-      transfer?.mint ||
-      null;
-
-    if (!mint) {
-      continue;
-    }
-
-    const fromUser =
-      transfer?.fromUserAccount ||
-      "";
-
-    const toUser =
-      transfer?.toUserAccount ||
-      "";
-
-    /*
-     * Only tokens entering Gake.
-     */
-    if (
-      toUser !==
-        GAKE_WALLET ||
-      fromUser ===
-        GAKE_WALLET
-    ) {
-      continue;
-    }
-
-    const tokenAmount =
-      Number(
-        transfer?.tokenAmount ??
-        0
-      );
-
-    const gakeNativeChange =
-      getNativeBalanceChange(
-        accountData,
-        GAKE_WALLET
-      );
-
-    const gakeTokenRawChange =
-      getTokenBalanceChange(
-        accountData,
-        GAKE_WALLET,
-        mint
-      );
-
-    const feePayer =
-      tx?.feePayer ||
-      "";
-
-    const fee =
-      Number(
-        tx?.fee ?? 0
-      );
-
-    const feePayerNativeChange =
-      getNativeBalanceChange(
-        accountData,
-        feePayer
-      );
-
-    const inference =
-      findOKXInputPattern(
-        nativeTransfers,
-        fromUser
-      );
-
-    const tokenSource =
-      findNegativeTokenSource(
-        accountData,
-        mint
-      );
-
-    const roleAnalysis =
-      buildRoleAnalysis({
-        gakeNativeChange,
-        fromUser,
-        feePayer,
-        inference,
-
-        tokenSourceUserAccount:
-          tokenSource?.userAccount ||
-          null,
-      });
-
-    const candidate = {
-      message:
-        "🔎 SWAP CANDIDATE",
-
-      action:
-        "SWAP_CANDIDATE",
-
-      confidence:
-        inference.confidence,
-
-      wallet:
-        GAKE_WALLET,
-
-      signature,
-
-      source:
-        tx?.source ||
-        "N/A",
-
-      type:
-        tx?.type ||
-        "N/A",
-
-      description:
-        tx?.description ||
-        "N/A",
-
-      mint,
-
-      tokenAmount,
-
-      fromUserAccount:
-        fromUser,
-
-      toUserAccount:
-        toUser,
-
-      gakeNativeBalanceChange:
-        gakeNativeChange,
-
-      gakeNativeBalanceChangeSOL:
-        lamportsToSol(
-          gakeNativeChange
-        ),
-
-      gakeTokenRawBalanceChange:
-        gakeTokenRawChange,
-
-      feePayer,
-
-      fee,
-
-      feeSOL:
-        lamportsToSol(
-          fee
-        ),
-
-      feePayerNativeBalanceChange:
-        feePayerNativeChange,
-
-      feePayerNativeBalanceChangeSOL:
-        lamportsToSol(
-          feePayerNativeChange
-        ),
-
-      inferredInputAccount:
-        inference.account,
-
-      inferredSwapInputSOL:
-        inference.sol,
-
-      inferredSwapInputLamports:
-        inference.lamports,
-
-      inferredInputConfidence:
-        inference.confidence,
-
-      inferenceReason:
-        inference.reason,
-
-      inputPatternMatched:
-        inference.matched,
-
-      inputPatternComponents:
-        inference.components,
-
-      inputPatternTotalLamports:
-        inference.lamports,
-
-      inputPatternComponentTransfers:
-        inference.componentTransfers,
-
-      inputAccountMatchesTokenTransfer:
-        inference.matchesTokenTransferUser,
-
-      tokenSourceUserAccount:
-        tokenSource?.userAccount ||
-        null,
-
-      tokenSourceTokenAccount:
-        tokenSource?.tokenAccount ||
-        null,
-
-      tokenSourceRawTokenAmount:
-        tokenSource?.rawTokenAmount ||
-        null,
-
-      tokenSourceTokenAmount:
-        tokenSource
-          ? rawAmountToToken(
-              Math.abs(
-                tokenSource.rawTokenAmount
-              ),
-              tokenSource.decimals
-            )
-          : null,
-
-      tokenSourceDecimals:
-        tokenSource?.decimals ??
-        null,
-
-      roleAnalysis,
-
-      nativeTransfers,
-
-      accountData,
-
-      events:
-        tx?.events ??
-        null,
-
-      instructions:
-        tx?.instructions ??
-        [],
-
-      transactionError:
-        tx?.transactionError ??
-        null,
-    };
-
-    candidates.push(
-      candidate
+    return jsonResponse(
+      {
+        ok: false,
+        error: "invalid_json",
+      },
+      400
     );
   }
 
-  return candidates;
+  const transactions =
+    normalizeTransactions(body);
+
+  console.log({
+    message: "📥 HELIUS POST RECEIVED",
+    receivedCount:
+      transactions.length,
+    receivedAt:
+      new Date().toISOString(),
+  });
+
+  if (!transactions.length) {
+    console.warn({
+      message:
+        "⚠️ EMPTY HELIUS PAYLOAD",
+    });
+
+    return jsonResponse({
+      ok: true,
+      received: 0,
+    });
+  }
+
+  let candidates = 0;
+  let buySignals = 0;
+  let paperBuys = 0;
+
+  for (const tx of transactions) {
+    const signature =
+      tx?.signature || null;
+
+    console.log({
+      message: "📦 HELIUS EVENT",
+      signature,
+      type: tx?.type || null,
+      source: tx?.source || null,
+      description:
+        tx?.description || null,
+      tokenTransfers:
+        Array.isArray(tx?.tokenTransfers)
+          ? tx.tokenTransfers.length
+          : 0,
+      nativeTransfers:
+        Array.isArray(tx?.nativeTransfers)
+          ? tx.nativeTransfers.length
+          : 0,
+    });
+
+    if (!signature) {
+      console.warn({
+        message:
+          "⚠️ EVENT WITHOUT SIGNATURE",
+      });
+
+      continue;
+    }
+
+    if (
+      processedSignatures.has(signature)
+    ) {
+      console.log({
+        message:
+          "♻️ DUPLICATE SIGNATURE",
+        signature,
+      });
+
+      continue;
+    }
+
+    processedSignatures.add(signature);
+
+    const candidate =
+      buildSwapCandidate(tx);
+
+    if (!candidate) {
+      console.log({
+        message:
+          "⚪ NO MATCHING CANDIDATE",
+        signature,
+        type: tx?.type || null,
+        source: tx?.source || null,
+      });
+
+      continue;
+    }
+
+    candidates++;
+
+    console.log(candidate);
+
+    const buySignal =
+      buildBuySignal(candidate);
+
+    if (!buySignal) {
+      console.log({
+        message:
+          "🟡 CANDIDATE REJECTED",
+        signature,
+        reason:
+          "BUY_SIGNAL validation failed",
+        candidate,
+      });
+
+      continue;
+    }
+
+    buySignals++;
+
+    console.log(buySignal);
+
+    const paperBuy =
+      createPaperBuy(buySignal);
+
+    if (paperBuy) {
+      paperBuys++;
+      console.log(paperBuy);
+    }
+  }
+
+  return jsonResponse({
+    ok: true,
+
+    received:
+      transactions.length,
+
+    candidates,
+    buySignals,
+    paperBuys,
+
+    execution:
+      "DISABLED",
+
+    realMoney:
+      false,
+  });
 }
 
 
 export default {
-  async fetch(
-    request,
-    env,
-    ctx
-  ) {
+  async fetch(request) {
+    const url =
+      new URL(request.url);
+
     if (
-      request.method !==
-      "POST"
+      request.method === "GET" &&
+      (
+        url.pathname === "/" ||
+        url.pathname === "/health"
+      )
     ) {
-      return new Response(
-        "Gake Trader Bot is running",
-        {
-          status: 200,
-        }
-      );
+      return jsonResponse({
+        ok: true,
+
+        service:
+          "gake-trader-bot",
+
+        status:
+          "RUNNING",
+
+        strategy:
+          "GAKE_OKX_PATTERN_PAPER",
+
+        execution:
+          "DISABLED",
+
+        realMoney:
+          false,
+
+        monitoredWallet:
+          GAKE_WALLET,
+
+        inputPatternLamports:
+          OKX_INPUT_PATTERN,
+
+        expectedInputLamports:
+          OKX_INPUT_TOTAL,
+
+        serverTime:
+          new Date().toISOString(),
+      });
     }
 
-    try {
-      const body =
-        await request.json();
-
-      const events =
-        Array.isArray(body)
-          ? body
-          : [body];
-
-      for (
-        const tx
-        of events
-      ) {
-        if (
-          tx?.type !==
-          "SWAP"
-        ) {
-          continue;
-        }
-
-        const signature =
-          tx?.signature;
-
-        if (!signature) {
-          console.log(
-            "⚠️ SWAP WITHOUT SIGNATURE"
-          );
-
-          continue;
-        }
-
-        /*
-         * Webhook deduplication.
-         */
-        if (
-          processedSignatures.has(
-            signature
-          )
-        ) {
-          console.log({
-            message:
-              "♻️ DUPLICATE SWAP IGNORED",
-
-            signature,
-          });
-
-          continue;
-        }
-
-        processedSignatures.add(
-          signature
-        );
-
-        const candidates =
-          buildSwapCandidate(
-            tx
-          );
-
-        for (
-          const candidate
-          of candidates
-        ) {
-          /*
-           * Keep diagnostic data.
-           */
-          console.log(
-            candidate
-          );
-
-          /*
-           * Build validated BUY signal.
-           */
-          const buySignal =
-            buildBuySignal(
-              candidate
-            );
-
-          if (!buySignal) {
-            continue;
-          }
-
-          /*
-           * BUY SIGNAL.
-           *
-           * STILL NO REAL TRADE.
-           */
-          console.log(
-            buySignal
-          );
-
-          /*
-           * PAPER BUY.
-           *
-           * STILL NO REAL TRADE.
-           */
-          const paperBuy =
-            createPaperBuy(
-              buySignal
-            );
-
-          if (paperBuy) {
-            console.log(
-              paperBuy
-            );
-          }
-        }
-      }
-
-      return new Response(
-        JSON.stringify({
-          ok: true,
-
-          received:
-            events.length,
-        }),
-        {
-          status: 200,
-
-          headers: {
-            "content-type":
-              "application/json",
-          },
-        }
-      );
-    } catch (error) {
-      console.error(
-        "WEBHOOK ERROR:",
-        String(error)
-      );
-
-      return new Response(
-        JSON.stringify({
-          ok: false,
-
-          error:
-            String(error),
-        }),
-        {
-          status: 400,
-
-          headers: {
-            "content-type":
-              "application/json",
-          },
-        }
-      );
+    if (
+      request.method === "POST"
+    ) {
+      return handleWebhook(request);
     }
+
+    return jsonResponse(
+      {
+        ok: false,
+        error:
+          "method_not_allowed",
+      },
+      405
+    );
   },
 };
