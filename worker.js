@@ -1,4 +1,5 @@
-const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
+const GAKE_WALLET =
+  "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 
 const OKX_INPUT_PATTERN = [
   987654,
@@ -7,26 +8,28 @@ const OKX_INPUT_PATTERN = [
   4692,
 ];
 
-const OKX_INPUT_TOTAL = 1_000_000;
+const OKX_INPUT_TOTAL_LAMPORTS = 1_000_000;
 
-// فقط برای تست.
-// با restart شدن Worker ممکن است پاک شود.
 const processedSignatures = new Set();
 const paperPositions = new Map();
 
 
 function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-    },
-  });
+  return new Response(
+    JSON.stringify(data, null, 2),
+    {
+      status,
+      headers: {
+        "content-type":
+          "application/json; charset=utf-8",
+      },
+    }
+  );
 }
 
 
-function lamportsToSOL(value) {
-  return Number(value || 0) / 1_000_000_000;
+function lamportsToSOL(lamports) {
+  return Number(lamports || 0) / 1_000_000_000;
 }
 
 
@@ -35,7 +38,10 @@ function normalizeTransactions(body) {
     return body;
   }
 
-  if (body && typeof body === "object") {
+  if (
+    body &&
+    typeof body === "object"
+  ) {
     return [body];
   }
 
@@ -43,67 +49,104 @@ function normalizeTransactions(body) {
 }
 
 
-function getGakeNativeBalanceChange(tx) {
-  const rows = Array.isArray(tx?.accountData)
-    ? tx.accountData
-    : [];
+function getAccountData(tx, account) {
+  const accountData =
+    Array.isArray(tx?.accountData)
+      ? tx.accountData
+      : [];
 
-  const item = rows.find(
-    (row) => row?.account === GAKE_WALLET
+  return (
+    accountData.find(
+      (item) =>
+        item?.account === account
+    ) || null
   );
-
-  return Number(item?.nativeBalanceChange || 0);
 }
 
 
-function findGakeReceivedToken(tx) {
-  const transfers = Array.isArray(tx?.tokenTransfers)
-    ? tx.tokenTransfers
-    : [];
+function getNativeBalanceChange(
+  tx,
+  account
+) {
+  const data =
+    getAccountData(tx, account);
 
-  const candidates = transfers.filter((transfer) => {
-    return (
-      transfer?.toUserAccount === GAKE_WALLET &&
+  return Number(
+    data?.nativeBalanceChange || 0
+  );
+}
+
+
+function findGakeReceivedTokens(tx) {
+  const tokenTransfers =
+    Array.isArray(tx?.tokenTransfers)
+      ? tx.tokenTransfers
+      : [];
+
+  return tokenTransfers.filter(
+    (transfer) =>
+      transfer?.toUserAccount ===
+        GAKE_WALLET &&
       transfer?.mint &&
-      Number(transfer?.tokenAmount || 0) > 0
-    );
-  });
+      Number(
+        transfer?.tokenAmount || 0
+      ) > 0
+  );
+}
 
-  if (!candidates.length) {
+
+function getLargestGakeReceivedToken(tx) {
+  const received =
+    findGakeReceivedTokens(tx);
+
+  if (!received.length) {
     return null;
   }
 
-  // فعلاً بزرگ‌ترین دریافت توکن را انتخاب می‌کنیم.
-  candidates.sort(
+  return [...received].sort(
     (a, b) =>
-      Number(b?.tokenAmount || 0) -
-      Number(a?.tokenAmount || 0)
-  );
-
-  return candidates[0];
+      Number(
+        b?.tokenAmount || 0
+      ) -
+      Number(
+        a?.tokenAmount || 0
+      )
+  )[0];
 }
 
 
 function groupNativeTransfersBySender(tx) {
-  const transfers = Array.isArray(tx?.nativeTransfers)
-    ? tx.nativeTransfers
-    : [];
+  const nativeTransfers =
+    Array.isArray(tx?.nativeTransfers)
+      ? tx.nativeTransfers
+      : [];
 
   const groups = new Map();
 
-  for (const transfer of transfers) {
-    const sender = transfer?.fromUserAccount;
+  for (const transfer of nativeTransfers) {
+    const sender =
+      transfer?.fromUserAccount;
 
-    if (!sender) continue;
+    if (!sender) {
+      continue;
+    }
 
     if (!groups.has(sender)) {
       groups.set(sender, []);
     }
 
     groups.get(sender).push({
-      fromUserAccount: sender,
-      toUserAccount: transfer?.toUserAccount || null,
-      amount: Number(transfer?.amount || 0),
+      fromUserAccount:
+        sender,
+
+      toUserAccount:
+        transfer?.toUserAccount ||
+        null,
+
+      amount:
+        Number(
+          transfer?.amount || 0
+        ),
     });
   }
 
@@ -111,21 +154,30 @@ function groupNativeTransfersBySender(tx) {
 }
 
 
-function matchesExactInputPattern(transfers) {
+function matchesOKXPattern(transfers) {
   if (!Array.isArray(transfers)) {
     return false;
   }
 
-  const amounts = transfers.map((x) =>
-    Number(x?.amount || 0)
-  );
+  const availableAmounts =
+    transfers.map(
+      (transfer) =>
+        Number(
+          transfer?.amount || 0
+        )
+    );
 
-  // لازم نیست تنها انتقال‌های فرستنده همین ۴ عدد باشند.
-  // کافی است هر چهار جزء pattern وجود داشته باشند.
-  const remaining = [...amounts];
+  const remaining =
+    [...availableAmounts];
 
-  for (const target of OKX_INPUT_PATTERN) {
-    const index = remaining.indexOf(target);
+  for (
+    const requiredAmount
+    of OKX_INPUT_PATTERN
+  ) {
+    const index =
+      remaining.indexOf(
+        requiredAmount
+      );
 
     if (index === -1) {
       return false;
@@ -139,19 +191,39 @@ function matchesExactInputPattern(transfers) {
 
 
 function findOKXInputAccount(tx) {
-  const groups = groupNativeTransfersBySender(tx);
+  const groups =
+    groupNativeTransfersBySender(tx);
 
-  for (const [sender, transfers] of groups.entries()) {
-    if (!matchesExactInputPattern(transfers)) {
+  for (
+    const [sender, transfers]
+    of groups.entries()
+  ) {
+    if (
+      !matchesOKXPattern(
+        transfers
+      )
+    ) {
       continue;
     }
 
     return {
-      inputAccount: sender,
-      confidence: "VERY_HIGH",
-      inputLamports: OKX_INPUT_TOTAL,
-      inputSOL: lamportsToSOL(OKX_INPUT_TOTAL),
-      components: OKX_INPUT_PATTERN,
+      inputAccount:
+        sender,
+
+      confidence:
+        "VERY_HIGH",
+
+      inputLamports:
+        OKX_INPUT_TOTAL_LAMPORTS,
+
+      inputSOL:
+        lamportsToSOL(
+          OKX_INPUT_TOTAL_LAMPORTS
+        ),
+
+      patternComponents:
+        [...OKX_INPUT_PATTERN],
+
       transfers,
     };
   }
@@ -160,73 +232,153 @@ function findOKXInputAccount(tx) {
 }
 
 
-function getFeePayerNativeBalanceChange(tx) {
-  const feePayer = tx?.feePayer;
+function buildDiagnosticEvent(tx) {
+  const receivedTokens =
+    findGakeReceivedTokens(tx);
 
-  if (!feePayer) return 0;
+  const gakeNativeChange =
+    getNativeBalanceChange(
+      tx,
+      GAKE_WALLET
+    );
 
-  const rows = Array.isArray(tx?.accountData)
-    ? tx.accountData
-    : [];
+  return {
+    message:
+      "📦 HELIUS EVENT",
 
-  const item = rows.find(
-    (row) => row?.account === feePayer
-  );
+    signature:
+      tx?.signature || null,
 
-  return Number(item?.nativeBalanceChange || 0);
+    type:
+      tx?.type || null,
+
+    source:
+      tx?.source || null,
+
+    description:
+      tx?.description || null,
+
+    feePayer:
+      tx?.feePayer || null,
+
+    fee:
+      Number(tx?.fee || 0),
+
+    feeSOL:
+      lamportsToSOL(
+        tx?.fee || 0
+      ),
+
+    transactionError:
+      tx?.transactionError ?? null,
+
+    tokenTransferCount:
+      Array.isArray(
+        tx?.tokenTransfers
+      )
+        ? tx.tokenTransfers.length
+        : 0,
+
+    nativeTransferCount:
+      Array.isArray(
+        tx?.nativeTransfers
+      )
+        ? tx.nativeTransfers.length
+        : 0,
+
+    gakeReceivedTokenCount:
+      receivedTokens.length,
+
+    gakeNativeBalanceChangeSOL:
+      lamportsToSOL(
+        gakeNativeChange
+      ),
+
+    timestamp:
+      tx?.timestamp || null,
+  };
 }
 
 
 function buildSwapCandidate(tx) {
-  const received = findGakeReceivedToken(tx);
+  const received =
+    getLargestGakeReceivedToken(tx);
 
   if (!received) {
     return null;
   }
 
-  const input = findOKXInputAccount(tx);
+  const input =
+    findOKXInputAccount(tx);
 
   if (!input) {
     return null;
   }
 
   const fromUserAccount =
-    received?.fromUserAccount || null;
+    received?.fromUserAccount ||
+    null;
 
   const inputMatchesTokenTransfer =
-    input.inputAccount === fromUserAccount;
+    input.inputAccount ===
+    fromUserAccount;
 
-  const gakeNativeBalanceChange =
-    getGakeNativeBalanceChange(tx);
+  const feePayer =
+    tx?.feePayer || null;
 
-  const feePayerNativeBalanceChange =
-    getFeePayerNativeBalanceChange(tx);
+  const gakeNativeChange =
+    getNativeBalanceChange(
+      tx,
+      GAKE_WALLET
+    );
+
+  const feePayerNativeChange =
+    feePayer
+      ? getNativeBalanceChange(
+          tx,
+          feePayer
+        )
+      : 0;
 
   return {
-    message: "🔎 SWAP CANDIDATE",
-    action: "SWAP_CANDIDATE",
+    message:
+      "🔎 SWAP CANDIDATE",
+
+    action:
+      "SWAP_CANDIDATE",
 
     confidence:
       inputMatchesTokenTransfer
         ? "VERY_HIGH"
         : "HIGH",
 
-    signature: tx?.signature || null,
-    source: tx?.source || null,
-    type: tx?.type || null,
+    wallet:
+      GAKE_WALLET,
 
-    mint: received?.mint || null,
-    tokenAmount: Number(
-      received?.tokenAmount || 0
-    ),
+    signature:
+      tx?.signature || null,
+
+    source:
+      tx?.source || null,
+
+    type:
+      tx?.type || null,
+
+    mint:
+      received?.mint || null,
+
+    tokenAmount:
+      Number(
+        received?.tokenAmount || 0
+      ),
 
     fromUserAccount,
+
     toUserAccount:
-      received?.toUserAccount || null,
+      received?.toUserAccount ||
+      null,
 
-    wallet: GAKE_WALLET,
-
-    feePayer: tx?.feePayer || null,
+    feePayer,
 
     inferredInputAccount:
       input.inputAccount,
@@ -240,30 +392,34 @@ function buildSwapCandidate(tx) {
     inferredSwapInputLamports:
       input.inputLamports,
 
-    inputPatternMatched: true,
+    inputPatternMatched:
+      true,
 
     inputPatternComponents:
-      input.components,
+      input.patternComponents,
 
     inputPatternTotalLamports:
-      OKX_INPUT_TOTAL,
+      OKX_INPUT_TOTAL_LAMPORTS,
 
     inputAccountMatchesTokenTransfer:
       inputMatchesTokenTransfer,
 
     gakeNativeBalanceChangeSOL:
       lamportsToSOL(
-        gakeNativeBalanceChange
+        gakeNativeChange
       ),
 
-    fee: Number(tx?.fee || 0),
+    fee:
+      Number(tx?.fee || 0),
 
     feeSOL:
-      lamportsToSOL(tx?.fee || 0),
+      lamportsToSOL(
+        tx?.fee || 0
+      ),
 
     feePayerNativeBalanceChangeSOL:
       lamportsToSOL(
-        feePayerNativeBalanceChange
+        feePayerNativeChange
       ),
 
     transactionError:
@@ -278,60 +434,112 @@ function buildSwapCandidate(tx) {
 }
 
 
-function buildBuySignal(candidate) {
+function validateCandidate(candidate) {
+  const reasons = [];
+
   if (!candidate) {
-    return null;
+    reasons.push(
+      "candidate_missing"
+    );
+
+    return reasons;
   }
 
-  // خطای تراکنش نباید وجود داشته باشد.
   if (
-    candidate.transactionError !== null &&
-    candidate.transactionError !== undefined
+    candidate.transactionError !==
+      null &&
+    candidate.transactionError !==
+      undefined
   ) {
-    return null;
+    reasons.push(
+      "transaction_error"
+    );
   }
 
   if (
-    candidate.inputPatternMatched !== true
+    candidate
+      .inputPatternMatched !==
+    true
   ) {
-    return null;
+    reasons.push(
+      "input_pattern_not_matched"
+    );
   }
 
   if (
-    candidate.inputAccountMatchesTokenTransfer !== true
+    candidate
+      .inputAccountMatchesTokenTransfer !==
+    true
   ) {
-    return null;
+    reasons.push(
+      "input_account_mismatch"
+    );
   }
 
   if (
-    candidate.inferredInputConfidence !==
+    candidate
+      .inferredInputConfidence !==
     "VERY_HIGH"
   ) {
-    return null;
+    reasons.push(
+      "confidence_not_very_high"
+    );
   }
 
   if (
-    Number(candidate.inferredSwapInputLamports) !==
-    OKX_INPUT_TOTAL
+    Number(
+      candidate
+        .inferredSwapInputLamports
+    ) !==
+    OKX_INPUT_TOTAL_LAMPORTS
   ) {
-    return null;
+    reasons.push(
+      "input_amount_mismatch"
+    );
   }
 
   if (!candidate.mint) {
-    return null;
+    reasons.push(
+      "mint_missing"
+    );
   }
 
   if (
-    Number(candidate.tokenAmount) <= 0
+    Number(
+      candidate.tokenAmount
+    ) <= 0
   ) {
-    return null;
+    reasons.push(
+      "invalid_token_amount"
+    );
   }
 
-  return {
-    message: "🟢 BUY SIGNAL",
-    action: "BUY_SIGNAL",
+  return reasons;
+}
 
-    confidence: "VERY_HIGH",
+
+function buildBuySignal(candidate) {
+  const rejectionReasons =
+    validateCandidate(candidate);
+
+  if (
+    rejectionReasons.length > 0
+  ) {
+    return {
+      signal: null,
+      rejectionReasons,
+    };
+  }
+
+  const signal = {
+    message:
+      "🟢 BUY SIGNAL",
+
+    action:
+      "BUY_SIGNAL",
+
+    confidence:
+      "VERY_HIGH",
 
     signature:
       candidate.signature,
@@ -346,19 +554,24 @@ function buildBuySignal(candidate) {
       candidate.mint,
 
     tokenAmount:
-      Number(candidate.tokenAmount),
+      Number(
+        candidate.tokenAmount
+      ),
 
     inputAccount:
-      candidate.inferredInputAccount,
+      candidate
+        .inferredInputAccount,
 
     inputSOL:
       Number(
-        candidate.inferredSwapInputSOL
+        candidate
+          .inferredSwapInputSOL
       ),
 
     inputLamports:
       Number(
-        candidate.inferredSwapInputLamports
+        candidate
+          .inferredSwapInputLamports
       ),
 
     fromUserAccount:
@@ -374,48 +587,75 @@ function buildBuySignal(candidate) {
       candidate.feePayer,
 
     feeSOL:
-      Number(candidate.feeSOL || 0),
+      Number(
+        candidate.feeSOL || 0
+      ),
 
     gakeNativeBalanceChangeSOL:
       Number(
-        candidate.gakeNativeBalanceChangeSOL || 0
+        candidate
+          .gakeNativeBalanceChangeSOL ||
+          0
       ),
 
     detectedAt:
       new Date().toISOString(),
 
-    execution: "DISABLED",
+    execution:
+      "DISABLED",
+
+    realMoney:
+      false,
+  };
+
+  return {
+    signal,
+    rejectionReasons: [],
   };
 }
 
 
-function createPaperBuy(buySignal) {
+function createPaperBuy(
+  buySignal
+) {
   if (!buySignal) {
     return null;
   }
 
-  const {
-    signature,
-    mint,
-    tokenAmount,
-    inputSOL,
-  } = buySignal;
+  const signature =
+    buySignal.signature;
+
+  const mint =
+    buySignal.mint;
+
+  const tokenAmount =
+    Number(
+      buySignal.tokenAmount
+    );
+
+  const inputSOL =
+    Number(
+      buySignal.inputSOL
+    );
 
   if (
     !signature ||
     !mint ||
-    Number(tokenAmount) <= 0 ||
-    Number(inputSOL) <= 0
+    tokenAmount <= 0 ||
+    inputSOL <= 0
   ) {
     return null;
   }
 
   if (
-    paperPositions.has(signature)
+    paperPositions.has(
+      signature
+    )
   ) {
     console.log({
       message:
         "♻️ PAPER POSITION ALREADY EXISTS",
+
       signature,
       mint,
     });
@@ -424,23 +664,25 @@ function createPaperBuy(buySignal) {
   }
 
   const entryPriceSOLPerToken =
-    Number(inputSOL) /
-    Number(tokenAmount);
+    inputSOL /
+    tokenAmount;
 
   const position = {
-    message: "📄 PAPER BUY",
-    action: "PAPER_BUY",
+    message:
+      "📄 PAPER BUY",
 
-    status: "PAPER_OPEN",
+    action:
+      "PAPER_BUY",
+
+    status:
+      "PAPER_OPEN",
 
     signature,
     mint,
 
-    tokenAmount:
-      Number(tokenAmount),
+    tokenAmount,
 
-    inputSOL:
-      Number(inputSOL),
+    inputSOL,
 
     entryPriceSOLPerToken,
 
@@ -456,8 +698,11 @@ function createPaperBuy(buySignal) {
     confidence:
       buySignal.confidence,
 
-    execution: "DISABLED",
-    realMoney: false,
+    execution:
+      "DISABLED",
+
+    realMoney:
+      false,
   };
 
   paperPositions.set(
@@ -469,21 +714,28 @@ function createPaperBuy(buySignal) {
 }
 
 
-async function handleWebhook(request) {
+async function handleWebhook(
+  request
+) {
   let body;
 
   try {
-    body = await request.json();
+    body =
+      await request.json();
   } catch (error) {
     console.error({
-      message: "❌ INVALID JSON",
-      error: String(error),
+      message:
+        "❌ INVALID JSON",
+
+      error:
+        String(error),
     });
 
     return jsonResponse(
       {
         ok: false,
-        error: "invalid_json",
+        error:
+          "invalid_json",
       },
       400
     );
@@ -493,14 +745,19 @@ async function handleWebhook(request) {
     normalizeTransactions(body);
 
   console.log({
-    message: "📥 HELIUS POST RECEIVED",
+    message:
+      "📥 HELIUS POST RECEIVED",
+
     receivedCount:
       transactions.length,
+
     receivedAt:
       new Date().toISOString(),
   });
 
-  if (!transactions.length) {
+  if (
+    transactions.length === 0
+  ) {
     console.warn({
       message:
         "⚠️ EMPTY HELIUS PAYLOAD",
@@ -509,33 +766,29 @@ async function handleWebhook(request) {
     return jsonResponse({
       ok: true,
       received: 0,
+      execution:
+        "DISABLED",
     });
   }
 
   let candidates = 0;
   let buySignals = 0;
   let paperBuys = 0;
+  let duplicates = 0;
 
-  for (const tx of transactions) {
+  for (
+    const tx
+    of transactions
+  ) {
+    const diagnostic =
+      buildDiagnosticEvent(tx);
+
+    console.log(
+      diagnostic
+    );
+
     const signature =
       tx?.signature || null;
-
-    console.log({
-      message: "📦 HELIUS EVENT",
-      signature,
-      type: tx?.type || null,
-      source: tx?.source || null,
-      description:
-        tx?.description || null,
-      tokenTransfers:
-        Array.isArray(tx?.tokenTransfers)
-          ? tx.tokenTransfers.length
-          : 0,
-      nativeTransfers:
-        Array.isArray(tx?.nativeTransfers)
-          ? tx.nativeTransfers.length
-          : 0,
-    });
 
     if (!signature) {
       console.warn({
@@ -547,18 +800,25 @@ async function handleWebhook(request) {
     }
 
     if (
-      processedSignatures.has(signature)
+      processedSignatures.has(
+        signature
+      )
     ) {
+      duplicates++;
+
       console.log({
         message:
           "♻️ DUPLICATE SIGNATURE",
+
         signature,
       });
 
       continue;
     }
 
-    processedSignatures.add(signature);
+    processedSignatures.add(
+      signature
+    );
 
     const candidate =
       buildSwapCandidate(tx);
@@ -567,9 +827,17 @@ async function handleWebhook(request) {
       console.log({
         message:
           "⚪ NO MATCHING CANDIDATE",
+
         signature,
-        type: tx?.type || null,
-        source: tx?.source || null,
+
+        type:
+          tx?.type || null,
+
+        source:
+          tx?.source || null,
+
+        reason:
+          "No Gake token receipt and/or OKX 0.001 SOL pattern",
       });
 
       continue;
@@ -577,18 +845,27 @@ async function handleWebhook(request) {
 
     candidates++;
 
-    console.log(candidate);
+    console.log(
+      candidate
+    );
 
-    const buySignal =
-      buildBuySignal(candidate);
+    const {
+      signal,
+      rejectionReasons,
+    } =
+      buildBuySignal(
+        candidate
+      );
 
-    if (!buySignal) {
+    if (!signal) {
       console.log({
         message:
           "🟡 CANDIDATE REJECTED",
+
         signature,
-        reason:
-          "BUY_SIGNAL validation failed",
+
+        rejectionReasons,
+
         candidate,
       });
 
@@ -597,14 +874,21 @@ async function handleWebhook(request) {
 
     buySignals++;
 
-    console.log(buySignal);
+    console.log(
+      signal
+    );
 
     const paperBuy =
-      createPaperBuy(buySignal);
+      createPaperBuy(
+        signal
+      );
 
     if (paperBuy) {
       paperBuys++;
-      console.log(paperBuy);
+
+      console.log(
+        paperBuy
+      );
     }
   }
 
@@ -614,8 +898,12 @@ async function handleWebhook(request) {
     received:
       transactions.length,
 
+    duplicates,
+
     candidates,
+
     buySignals,
+
     paperBuys,
 
     execution:
@@ -630,13 +918,18 @@ async function handleWebhook(request) {
 export default {
   async fetch(request) {
     const url =
-      new URL(request.url);
+      new URL(
+        request.url
+      );
 
     if (
-      request.method === "GET" &&
+      request.method ===
+        "GET" &&
       (
-        url.pathname === "/" ||
-        url.pathname === "/health"
+        url.pathname ===
+          "/" ||
+        url.pathname ===
+          "/health"
       )
     ) {
       return jsonResponse({
@@ -648,8 +941,14 @@ export default {
         status:
           "RUNNING",
 
+        version:
+          "GAKE-DIAGNOSTIC-ANY-V1",
+
         strategy:
           "GAKE_OKX_PATTERN_PAPER",
+
+        webhookModeExpected:
+          "ANY",
 
         execution:
           "DISABLED",
@@ -664,7 +963,7 @@ export default {
           OKX_INPUT_PATTERN,
 
         expectedInputLamports:
-          OKX_INPUT_TOTAL,
+          OKX_INPUT_TOTAL_LAMPORTS,
 
         serverTime:
           new Date().toISOString(),
@@ -672,14 +971,18 @@ export default {
     }
 
     if (
-      request.method === "POST"
+      request.method ===
+      "POST"
     ) {
-      return handleWebhook(request);
+      return handleWebhook(
+        request
+      );
     }
 
     return jsonResponse(
       {
         ok: false,
+
         error:
           "method_not_allowed",
       },
