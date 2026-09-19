@@ -323,12 +323,25 @@ function buildDiagnosticEvent(tx) {
 
   const diagnosticAccountData =
     rawAccountData
-      .filter(
-        (item) =>
+      .filter((item) => {
+        const tokenBalanceChanges =
+          Array.isArray(
+            item?.tokenBalanceChanges
+          )
+            ? item.tokenBalanceChanges
+            : [];
+
+        return (
           relevantAccounts.has(
             item?.account
+          ) ||
+          tokenBalanceChanges.some(
+            (change) =>
+              change?.userAccount ===
+              GAKE_WALLET
           )
-      )
+        );
+      })
       .map((item) => {
         const tokenBalanceChanges =
           Array.isArray(
