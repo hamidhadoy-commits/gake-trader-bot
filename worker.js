@@ -233,6 +233,21 @@ function findOKXInputAccount(tx) {
 
 
 function buildDiagnosticEvent(tx) {
+  const tokenTransfers =
+    Array.isArray(tx?.tokenTransfers)
+      ? tx.tokenTransfers
+      : [];
+
+  const nativeTransfers =
+    Array.isArray(tx?.nativeTransfers)
+      ? tx.nativeTransfers
+      : [];
+
+  const rawAccountData =
+    Array.isArray(tx?.accountData)
+      ? tx.accountData
+      : [];
+
   const receivedTokens =
     findGakeReceivedTokens(tx);
 
@@ -241,6 +256,137 @@ function buildDiagnosticEvent(tx) {
       tx,
       GAKE_WALLET
     );
+
+  const feePayer =
+    tx?.feePayer || null;
+
+  const relevantAccounts =
+    new Set(
+      [
+        GAKE_WALLET,
+        feePayer,
+      ].filter(Boolean)
+    );
+
+  const diagnosticTokenTransfers =
+    tokenTransfers.map(
+      (transfer) => ({
+        mint:
+          transfer?.mint || null,
+
+        tokenAmount:
+          Number(
+            transfer?.tokenAmount || 0
+          ),
+
+        fromUserAccount:
+          transfer?.fromUserAccount ||
+          null,
+
+        toUserAccount:
+          transfer?.toUserAccount ||
+          null,
+
+        ...(transfer?.fromTokenAccount
+          ? {
+              fromTokenAccount:
+                transfer.fromTokenAccount,
+            }
+          : {}),
+
+        ...(transfer?.toTokenAccount
+          ? {
+              toTokenAccount:
+                transfer.toTokenAccount,
+            }
+          : {}),
+      })
+    );
+
+  const diagnosticNativeTransfers =
+    nativeTransfers.map(
+      (transfer) => ({
+        fromUserAccount:
+          transfer?.fromUserAccount ||
+          null,
+
+        toUserAccount:
+          transfer?.toUserAccount ||
+          null,
+
+        amount:
+          Number(
+            transfer?.amount || 0
+          ),
+      })
+    );
+
+  const diagnosticAccountData =
+    rawAccountData
+      .filter(
+        (item) =>
+          relevantAccounts.has(
+            item?.account
+          )
+      )
+      .map((item) => {
+        const tokenBalanceChanges =
+          Array.isArray(
+            item?.tokenBalanceChanges
+          )
+            ? item.tokenBalanceChanges
+            : [];
+
+        return {
+          account:
+            item?.account || null,
+
+          nativeBalanceChange:
+            Number(
+              item?.nativeBalanceChange ||
+                0
+            ),
+
+          nativeBalanceChangeSOL:
+            lamportsToSOL(
+              item?.nativeBalanceChange ||
+                0
+            ),
+
+          tokenBalanceChanges:
+            tokenBalanceChanges.map(
+              (change) => ({
+                mint:
+                  change?.mint || null,
+
+                userAccount:
+                  change?.userAccount ||
+                  null,
+
+                tokenAccount:
+                  change?.tokenAccount ||
+                  null,
+
+                rawTokenAmount:
+                  change?.rawTokenAmount
+                    ? {
+                        tokenAmount:
+                          change
+                            .rawTokenAmount
+                            .tokenAmount ??
+                          null,
+
+                        decimals:
+                          change
+                            .rawTokenAmount
+                            .decimals ??
+                          null,
+                      }
+                    : null,
+              })
+            ),
+        };
+      });
 
   return {
     message:
@@ -258,8 +404,7 @@ function buildDiagnosticEvent(tx) {
     description:
       tx?.description || null,
 
-    feePayer:
-      tx?.feePayer || null,
+    feePayer,
 
     fee:
       Number(tx?.fee || 0),
@@ -273,18 +418,10 @@ function buildDiagnosticEvent(tx) {
       tx?.transactionError ?? null,
 
     tokenTransferCount:
-      Array.isArray(
-        tx?.tokenTransfers
-      )
-        ? tx.tokenTransfers.length
-        : 0,
+      tokenTransfers.length,
 
     nativeTransferCount:
-      Array.isArray(
-        tx?.nativeTransfers
-      )
-        ? tx.nativeTransfers.length
-        : 0,
+      nativeTransfers.length,
 
     gakeReceivedTokenCount:
       receivedTokens.length,
@@ -293,6 +430,15 @@ function buildDiagnosticEvent(tx) {
       lamportsToSOL(
         gakeNativeChange
       ),
+
+    tokenTransfers:
+      diagnosticTokenTransfers,
+
+    nativeTransfers:
+      diagnosticNativeTransfers,
+
+    accountData:
+      diagnosticAccountData,
 
     timestamp:
       tx?.timestamp || null,
