@@ -1,3 +1,8 @@
 name = "gake-trader-bot"
 main = "worker.js"
 compatibility_date = "2026-09-10"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "gake-trader-db"
+database_id = "f6b4e7b5-1b9e-4e28-a077-83d4cece9c3c"
