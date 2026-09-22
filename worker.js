@@ -1432,6 +1432,876 @@ async function createPaperCopyBuy(buySignal, env) {
   };
 }
 
+const DEXSCREENER_TOKEN_URL_PREFIX =
+  "https://api.dexscreener.com/tokens/v1/solana/";
+const DEXSCREENER_MAX_TOKENS_PER_REQUEST = 30;
+
+async function getOpenPaperExitPositions(env) {
+  const result = await runDatabaseOperation("get_open_paper_exit_positions", () =>
+    env.DB.prepare(
+      `SELECT
+         source_signature,
+         mint,
+         detector,
+         simulated_entry_price_sol_per_token,
+         simulated_token_amount,
+         remaining_token_amount,
+         entry_cost_lamports,
+         realized_proceeds_lamports,
+         realized_pnl_lamports,
+         highest_price_sol_per_token,
+         take_profit_hit,
+         status,
+         opened_at,
+         updated_at
+       FROM paper_copy_positions
+       WHERE status = 'PAPER_OPEN'
+         AND remaining_token_amount > 0
+       ORDER BY opened_at ASC`
+    ).all()
+  );
+
+  return Array.isArray(result?.results) ? result.results : [];
+}
+
+async function getPaperExitPosition(env, sourceSignature) {
+  return runDatabaseOperation("get_paper_exit_position", () =>
+    env.DB.prepare(
+      `SELECT
+         source_signature,
+         mint,
+         detector,
+         simulated_entry_price_sol_per_token,
+         simulated_token_amount,
+         remaining_token_amount,
+         entry_cost_lamports,
+         realized_proceeds_lamports,
+         realized_pnl_lamports,
+         highest_price_sol_per_token,
+         take_profit_hit,
+         status,
+         opened_at,
+         updated_at,
+         closed_at,
+         close_reason
+       FROM paper_copy_positions
+       WHERE source_signature = ?
+       LIMIT 1`
+    )
+      .bind(sourceSignature)
+      .first()
+  );
+}
+
+async function refreshPaperPositionHigh(env, sourceSignature, observedPrice) {
+  if (!Number.isFinite(observedPrice) || observedPrice <= 0) return;
+
+  const now = new Date().toISOString();
+
+  await runDatabaseOperation("refresh_paper_position_high", () =>
+    env.DB.prepare(
+      `UPDATE paper_copy_positions
+       SET
+         highest_price_sol_per_token =
+           MAX(?, simulated_entry_price_sol_per_token),
+         updated_at = ?
+       WHERE source_signature = ?
+         AND status = 'PAPER_OPEN'
+         AND (
+           highest_price_sol_per_token IS NULL
+           OR MAX(?, simulated_entry_price_sol_per_token) >
+              highest_price_sol_per_token
+         )`
+    )
+      .bind(observedPrice, now, sourceSignature, observedPrice)
+      .run()
+  );
+}
+
+function selectBestSolQuotedPair(pairs, mint) {
+  let best = null;
+
+  for (const pair of pairs) {
+    if (pair?.chainId !== "solana") continue;
+    if (pair?.baseToken?.address !== mint) continue;
+    if (pair?.quoteToken?.address !== WRAPPED_SOL_MINT) continue;
+
+    const priceSOLPerToken = Number(pair?.priceNative);
+    const liquidityUSD = Number(pair?.liquidity?.usd || 0);
+
+    if (!Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) continue;
+
+    if (!best || liquidityUSD > best.liquidityUSD) {
+      best = {
+        priceSOLPerToken,
+        liquidityUSD: Number.isFinite(liquidityUSD) ? liquidityUSD : 0,
+        pairAddress: pair?.pairAddress || null,
+        dexId: pair?.dexId || null,
+        url: pair?.url || null,
+      };
+    }
+  }
+
+  return best;
+}
+
+async function fetchDexScreenerSolPrices(mints) {
+  const uniqueMints = [...new Set((mints || []).filter(Boolean))];
+  const prices = new Map();
+
+  for (
+    let offset = 0;
+    offset < uniqueMints.length;
+    offset += DEXSCREENER_MAX_TOKENS_PER_REQUEST
+  ) {
+    const chunk = uniqueMints.slice(
+      offset,
+      offset + DEXSCREENER_MAX_TOKENS_PER_REQUEST
+    );
+
+    if (!chunk.length) continue;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const response = await fetch(
+        `${DEXSCREENER_TOKEN_URL_PREFIX}${chunk.join(",")}`,
+        {
+          method: "GET",
+          headers: { accept: "application/json" },
+          signal: controller.signal,
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`DEX Screener HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const pairs = Array.isArray(payload) ? payload : [];
+
+      for (const mint of chunk) {
+        const best = selectBestSolQuotedPair(pairs, mint);
+        if (best) prices.set(mint, best);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  return prices;
+}
+
+function buildPaperExitThresholds(position, config, observedPrice) {
+  const entryPrice = Number(position?.simulated_entry_price_sol_per_token || 0);
+  const storedHigh = Number(position?.highest_price_sol_per_token || 0);
+  const highPrice = Math.max(entryPrice, storedHigh, observedPrice);
+
+  if (
+    !Number.isFinite(entryPrice) ||
+    entryPrice <= 0 ||
+    !Number.isFinite(observedPrice) ||
+    observedPrice <= 0
+  ) {
+    return null;
+  }
+
+  const stopLossBps = clamp(
+    Math.floor(Number(config?.stop_loss_bps || 0)),
+    0,
+    BPS_DENOMINATOR
+  );
+  const takeProfitBps = Math.max(
+    0,
+    Math.floor(Number(config?.take_profit_bps || 0))
+  );
+  const trailingStopBps = clamp(
+    Math.floor(Number(config?.trailing_stop_bps || 0)),
+    0,
+    BPS_DENOMINATOR
+  );
+
+  return {
+    entryPrice,
+    highPrice,
+    stopLossPrice:
+      entryPrice * (1 - stopLossBps / BPS_DENOMINATOR),
+    takeProfitPrice:
+      entryPrice * (1 + takeProfitBps / BPS_DENOMINATOR),
+    trailingStopPrice:
+      highPrice * (1 - trailingStopBps / BPS_DENOMINATOR),
+    stopLossBps,
+    takeProfitBps,
+    trailingStopBps,
+  };
+}
+
+async function getPaperExitAccountingState(env, sourceSignature) {
+  const row = await runDatabaseOperation("get_paper_exit_accounting_state", () =>
+    env.DB.prepare(
+      `SELECT
+         COALESCE(MAX(exit_sequence), 0) + 1 AS next_sequence,
+         COALESCE(SUM(allocated_entry_cost_lamports), 0) AS allocated_entry_cost_lamports
+       FROM paper_copy_exits
+       WHERE source_signature = ?`
+    )
+      .bind(sourceSignature)
+      .first()
+  );
+
+  return {
+    nextSequence: Math.max(1, Math.floor(Number(row?.next_sequence || 1))),
+    allocatedEntryCostLamports: Math.max(
+      0,
+      Math.floor(Number(row?.allocated_entry_cost_lamports || 0))
+    ),
+  };
+}
+
+async function executePaperCopyExit({
+  env,
+  position,
+  config,
+  exitReason,
+  triggerPriceSOLPerToken,
+  soldTokenAmount,
+  closePosition,
+  markTakeProfit,
+}) {
+  const sourceSignature = position?.source_signature || null;
+  const initialTokenAmount = Number(position?.simulated_token_amount || 0);
+  const remainingTokenAmount = Number(position?.remaining_token_amount || 0);
+  const entryCostLamports = Math.max(
+    0,
+    Math.floor(Number(position?.entry_cost_lamports || 0))
+  );
+
+  if (
+    !sourceSignature ||
+    !Number.isFinite(triggerPriceSOLPerToken) ||
+    triggerPriceSOLPerToken <= 0 ||
+    !Number.isFinite(initialTokenAmount) ||
+    initialTokenAmount <= 0 ||
+    !Number.isFinite(remainingTokenAmount) ||
+    remainingTokenAmount <= 0
+  ) {
+    return { inserted: false, skipped: true, reason: "invalid_exit_position" };
+  }
+
+  const tokensToSell = Math.min(
+    remainingTokenAmount,
+    Math.max(0, Number(soldTokenAmount || 0))
+  );
+
+  if (!Number.isFinite(tokensToSell) || tokensToSell <= 0) {
+    return { inserted: false, skipped: true, reason: "invalid_exit_amount" };
+  }
+
+  const sellSlippageBps = clamp(
+    Math.floor(Number(config?.sell_slippage_bps || 0)),
+    0,
+    BPS_DENOMINATOR
+  );
+  const sellFeeLamports = Math.max(
+    0,
+    Math.floor(Number(config?.sell_fee_lamports || 0))
+  );
+  const simulatedExitPriceSOLPerToken =
+    triggerPriceSOLPerToken *
+    (1 - sellSlippageBps / BPS_DENOMINATOR);
+
+  const grossProceedsLamports = Math.floor(
+    tokensToSell * triggerPriceSOLPerToken * LAMPORTS_PER_SOL
+  );
+  const postSlippageProceedsLamports = Math.floor(
+    tokensToSell * simulatedExitPriceSOLPerToken * LAMPORTS_PER_SOL
+  );
+  const netProceedsLamports =
+    postSlippageProceedsLamports - sellFeeLamports;
+
+  if (
+    !Number.isFinite(simulatedExitPriceSOLPerToken) ||
+    simulatedExitPriceSOLPerToken < 0 ||
+    !Number.isSafeInteger(grossProceedsLamports) ||
+    !Number.isSafeInteger(postSlippageProceedsLamports) ||
+    !Number.isSafeInteger(netProceedsLamports)
+  ) {
+    return { inserted: false, skipped: true, reason: "invalid_exit_proceeds" };
+  }
+
+  const accountingState = await getPaperExitAccountingState(
+    env,
+    sourceSignature
+  );
+  const unallocatedEntryCostLamports = Math.max(
+    0,
+    entryCostLamports - accountingState.allocatedEntryCostLamports
+  );
+
+  let allocatedEntryCostLamports;
+
+  if (closePosition) {
+    allocatedEntryCostLamports = unallocatedEntryCostLamports;
+  } else {
+    const proportionalCost = Math.floor(
+      entryCostLamports *
+      clamp(tokensToSell / initialTokenAmount, 0, 1)
+    );
+    allocatedEntryCostLamports = Math.min(
+      unallocatedEntryCostLamports,
+      Math.max(0, proportionalCost)
+    );
+  }
+
+  const realizedPnlLamports =
+    netProceedsLamports - allocatedEntryCostLamports;
+  const exitSequence = accountingState.nextSequence;
+  const operationId =
+    `PAPER_COPY_EXIT:${sourceSignature}:${exitSequence}:${exitReason}`;
+  const now = new Date().toISOString();
+  const note =
+    `Paper copy sell; reason=${exitReason}; ` +
+    `operationId=${operationId}; triggerPriceSOL=${triggerPriceSOLPerToken}; ` +
+    `simulatedExitPriceSOL=${simulatedExitPriceSOLPerToken}`;
+
+  const exitGuard = markTakeProfit
+    ? "AND take_profit_hit = 0"
+    : "";
+
+  const positionUpdateSQL = closePosition
+    ? `UPDATE paper_copy_positions
+       SET
+         remaining_token_amount = 0,
+         realized_proceeds_lamports =
+           realized_proceeds_lamports + ?,
+         realized_pnl_lamports =
+           realized_pnl_lamports + ?,
+         status = 'PAPER_CLOSED',
+         take_profit_hit = CASE WHEN ? = 1 THEN 1 ELSE take_profit_hit END,
+         closed_at = ?,
+         close_reason = ?,
+         updated_at = ?
+       WHERE source_signature = ?
+         AND status = 'PAPER_OPEN'
+         AND EXISTS (
+           SELECT 1
+           FROM paper_copy_exits
+           WHERE operation_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM paper_copy_ledger
+           WHERE event_type = 'PAPER_SELL'
+             AND exit_id = (
+               SELECT id
+               FROM paper_copy_exits
+               WHERE operation_id = ?
+               LIMIT 1
+             )
+         )`
+    : `UPDATE paper_copy_positions
+       SET
+         remaining_token_amount =
+           MAX(0, remaining_token_amount - ?),
+         realized_proceeds_lamports =
+           realized_proceeds_lamports + ?,
+         realized_pnl_lamports =
+           realized_pnl_lamports + ?,
+         take_profit_hit = CASE WHEN ? = 1 THEN 1 ELSE take_profit_hit END,
+         updated_at = ?
+       WHERE source_signature = ?
+         AND status = 'PAPER_OPEN'
+         AND EXISTS (
+           SELECT 1
+           FROM paper_copy_exits
+           WHERE operation_id = ?
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM paper_copy_ledger
+           WHERE event_type = 'PAPER_SELL'
+             AND exit_id = (
+               SELECT id
+               FROM paper_copy_exits
+               WHERE operation_id = ?
+               LIMIT 1
+             )
+         )`;
+
+  const positionStatement = closePosition
+    ? env.DB.prepare(positionUpdateSQL).bind(
+        netProceedsLamports,
+        realizedPnlLamports,
+        markTakeProfit ? 1 : 0,
+        now,
+        exitReason,
+        now,
+        sourceSignature,
+        operationId,
+        operationId
+      )
+    : env.DB.prepare(positionUpdateSQL).bind(
+        tokensToSell,
+        netProceedsLamports,
+        realizedPnlLamports,
+        markTakeProfit ? 1 : 0,
+        now,
+        sourceSignature,
+        operationId,
+        operationId
+      );
+
+  let batchResults;
+
+  try {
+    batchResults = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO paper_copy_exits (
+          source_signature,
+          exit_reason,
+          sold_token_amount,
+          trigger_price_sol_per_token,
+          simulated_exit_price_sol_per_token,
+          sell_slippage_bps,
+          sell_fee_lamports,
+          gross_proceeds_lamports,
+          net_proceeds_lamports,
+          realized_pnl_lamports,
+          exited_at,
+          created_at,
+          exit_sequence,
+          allocated_entry_cost_lamports,
+          operation_id
+        )
+        SELECT
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1
+          FROM paper_copy_positions
+          WHERE source_signature = ?
+            AND status = 'PAPER_OPEN'
+            AND remaining_token_amount > 0
+            ${exitGuard}
+        )`
+      ).bind(
+        sourceSignature,
+        exitReason,
+        tokensToSell,
+        triggerPriceSOLPerToken,
+        simulatedExitPriceSOLPerToken,
+        sellSlippageBps,
+        sellFeeLamports,
+        grossProceedsLamports,
+        netProceedsLamports,
+        realizedPnlLamports,
+        now,
+        now,
+        exitSequence,
+        allocatedEntryCostLamports,
+        operationId,
+        sourceSignature
+      ),
+
+      positionStatement,
+
+      env.DB.prepare(
+        `UPDATE paper_copy_account
+         SET
+           cash_balance_lamports =
+             cash_balance_lamports + ?,
+           realized_pnl_lamports =
+             realized_pnl_lamports + ?,
+           total_fees_lamports =
+             total_fees_lamports + ?,
+           opened_positions_count =
+             CASE
+               WHEN ? = 1 THEN MAX(0, opened_positions_count - 1)
+               ELSE opened_positions_count
+             END,
+           closed_positions_count =
+             closed_positions_count + CASE WHEN ? = 1 THEN 1 ELSE 0 END,
+           updated_at = ?
+         WHERE id = 1
+           AND EXISTS (
+             SELECT 1
+             FROM paper_copy_exits
+             WHERE operation_id = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM paper_copy_ledger
+             WHERE event_type = 'PAPER_SELL'
+               AND exit_id = (
+                 SELECT id
+                 FROM paper_copy_exits
+                 WHERE operation_id = ?
+                 LIMIT 1
+               )
+           )`
+      ).bind(
+        netProceedsLamports,
+        realizedPnlLamports,
+        sellFeeLamports,
+        closePosition ? 1 : 0,
+        closePosition ? 1 : 0,
+        now,
+        operationId,
+        operationId
+      ),
+
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO paper_copy_ledger (
+          event_type,
+          source_signature,
+          exit_id,
+          cash_delta_lamports,
+          fee_lamports,
+          balance_after_lamports,
+          note,
+          created_at
+        )
+        SELECT
+          'PAPER_SELL',
+          ?,
+          e.id,
+          ?,
+          ?,
+          a.cash_balance_lamports,
+          ?,
+          ?
+        FROM paper_copy_account a
+        JOIN paper_copy_exits e
+          ON e.operation_id = ?
+        WHERE a.id = 1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM paper_copy_ledger l
+            WHERE l.event_type = 'PAPER_SELL'
+              AND l.exit_id = e.id
+          )`
+      ).bind(
+        sourceSignature,
+        netProceedsLamports,
+        sellFeeLamports,
+        note,
+        now,
+        operationId
+      ),
+    ]);
+  } catch (error) {
+    console.error({
+      message: "❌ DATABASE ERROR",
+      operation: "execute_paper_copy_exit",
+      sourceSignature,
+      exitReason,
+      operationId,
+      error: String(error),
+    });
+    throw new DatabaseError("execute_paper_copy_exit", error);
+  }
+
+  const exitChanges = Number(batchResults?.[0]?.meta?.changes ?? 0);
+  const positionChanges = Number(batchResults?.[1]?.meta?.changes ?? 0);
+  const accountChanges = Number(batchResults?.[2]?.meta?.changes ?? 0);
+  const ledgerChanges = Number(batchResults?.[3]?.meta?.changes ?? 0);
+
+  if (exitChanges !== 1) {
+    return {
+      inserted: false,
+      skipped: true,
+      reason: "exit_guard_or_idempotency_blocked",
+      operationId,
+    };
+  }
+
+  if (
+    positionChanges !== 1 ||
+    accountChanges !== 1 ||
+    ledgerChanges !== 1
+  ) {
+    const error = new Error(
+      `Paper-copy exit accounting invariant failed: ` +
+      `exit=${exitChanges}, position=${positionChanges}, ` +
+      `account=${accountChanges}, ledger=${ledgerChanges}`
+    );
+
+    console.error({
+      message: "❌ DATABASE ERROR",
+      operation: "verify_paper_copy_exit_batch",
+      sourceSignature,
+      exitReason,
+      operationId,
+      exitChanges,
+      positionChanges,
+      accountChanges,
+      ledgerChanges,
+      error: String(error),
+    });
+
+    throw new DatabaseError("verify_paper_copy_exit_batch", error);
+  }
+
+  const freshAccount = await getPaperCopyAccount(env);
+
+  return {
+    inserted: true,
+    skipped: false,
+    exit: {
+      message: "📕 PAPER COPY SELL",
+      action: "PAPER_COPY_SELL",
+      sourceSignature,
+      mint: position.mint,
+      exitReason,
+      exitSequence,
+      operationId,
+      triggerPriceSOLPerToken,
+      simulatedExitPriceSOLPerToken,
+      soldTokenAmount: tokensToSell,
+      grossProceedsLamports,
+      sellSlippageBps,
+      sellFeeLamports,
+      netProceedsLamports,
+      allocatedEntryCostLamports,
+      realizedPnlLamports,
+      closePosition,
+      cashBalanceAfterLamports: Number(
+        freshAccount.cash_balance_lamports || 0
+      ),
+      accountRealizedPnlLamports: Number(
+        freshAccount.realized_pnl_lamports || 0
+      ),
+      execution: "DISABLED",
+      realMoney: false,
+      exitedAt: now,
+    },
+  };
+}
+
+async function processPaperExitPosition(env, rawPosition, config, priceInfo) {
+  const sourceSignature = rawPosition?.source_signature || null;
+  const observedPrice = Number(priceInfo?.priceSOLPerToken || 0);
+
+  if (!sourceSignature || !Number.isFinite(observedPrice) || observedPrice <= 0) {
+    return { exits: 0, skipped: 1 };
+  }
+
+  await refreshPaperPositionHigh(env, sourceSignature, observedPrice);
+  let position = await getPaperExitPosition(env, sourceSignature);
+
+  if (!position || position.status !== "PAPER_OPEN") {
+    return { exits: 0, skipped: 1 };
+  }
+
+  let thresholds = buildPaperExitThresholds(position, config, observedPrice);
+  if (!thresholds) return { exits: 0, skipped: 1 };
+
+  console.log({
+    message: "📈 PAPER PRICE",
+    sourceSignature,
+    mint: position.mint,
+    observedPriceSOLPerToken: observedPrice,
+    highestPriceSOLPerToken: thresholds.highPrice,
+    entryPriceSOLPerToken: thresholds.entryPrice,
+    stopLossPriceSOLPerToken: thresholds.stopLossPrice,
+    takeProfitPriceSOLPerToken: thresholds.takeProfitPrice,
+    trailingStopPriceSOLPerToken: thresholds.trailingStopPrice,
+    takeProfitHit: Number(position.take_profit_hit || 0),
+    remainingTokenAmount: Number(position.remaining_token_amount || 0),
+    pairAddress: priceInfo?.pairAddress || null,
+    dexId: priceInfo?.dexId || null,
+    liquidityUSD: Number(priceInfo?.liquidityUSD || 0),
+  });
+
+  let exits = 0;
+
+  if (observedPrice <= thresholds.stopLossPrice) {
+    const result = await executePaperCopyExit({
+      env,
+      position,
+      config,
+      exitReason: "STOP_LOSS",
+      triggerPriceSOLPerToken: observedPrice,
+      soldTokenAmount: Number(position.remaining_token_amount || 0),
+      closePosition: true,
+      markTakeProfit: false,
+    });
+
+    if (result?.inserted && result.exit) {
+      exits++;
+      console.log(result.exit);
+    }
+
+    return { exits, skipped: result?.inserted ? 0 : 1 };
+  }
+
+  const takeProfitEnabled = Number(config?.take_profit_enabled || 0) === 1;
+  const takeProfitHit = Number(position.take_profit_hit || 0) === 1;
+  const takeProfitSellBps = clamp(
+    Math.floor(Number(config?.take_profit_sell_bps || 0)),
+    0,
+    BPS_DENOMINATOR
+  );
+
+  if (
+    takeProfitEnabled &&
+    !takeProfitHit &&
+    takeProfitSellBps > 0 &&
+    observedPrice >= thresholds.takeProfitPrice
+  ) {
+    const targetSellAmount =
+      Number(position.simulated_token_amount || 0) *
+      (takeProfitSellBps / BPS_DENOMINATOR);
+
+    const result = await executePaperCopyExit({
+      env,
+      position,
+      config,
+      exitReason: "TAKE_PROFIT_PARTIAL",
+      triggerPriceSOLPerToken: observedPrice,
+      soldTokenAmount: targetSellAmount,
+      closePosition: targetSellAmount >= Number(position.remaining_token_amount || 0),
+      markTakeProfit: true,
+    });
+
+    if (result?.inserted && result.exit) {
+      exits++;
+      console.log(result.exit);
+    }
+
+    position = await getPaperExitPosition(env, sourceSignature);
+    if (!position || position.status !== "PAPER_OPEN") {
+      return { exits, skipped: 0 };
+    }
+
+    thresholds = buildPaperExitThresholds(position, config, observedPrice);
+    if (!thresholds) return { exits, skipped: 1 };
+  }
+
+  const trailingStopEnabled = Number(config?.trailing_stop_enabled || 0) === 1;
+
+  if (
+    trailingStopEnabled &&
+    Number(config?.trailing_stop_bps || 0) > 0 &&
+    observedPrice <= thresholds.trailingStopPrice
+  ) {
+    const result = await executePaperCopyExit({
+      env,
+      position,
+      config,
+      exitReason: "TRAILING_STOP",
+      triggerPriceSOLPerToken: observedPrice,
+      soldTokenAmount: Number(position.remaining_token_amount || 0),
+      closePosition: true,
+      markTakeProfit: false,
+    });
+
+    if (result?.inserted && result.exit) {
+      exits++;
+      console.log(result.exit);
+    }
+
+    return { exits, skipped: result?.inserted ? 0 : 1 };
+  }
+
+  return { exits, skipped: 0 };
+}
+
+async function runPaperExitTick(env, trigger = {}) {
+  const startedAt = new Date().toISOString();
+  const [config, positions] = await Promise.all([
+    getPaperCopyConfig(env),
+    getOpenPaperExitPositions(env),
+  ]);
+
+  console.log({
+    message: "⏱️ PAPER EXIT TICK",
+    startedAt,
+    trigger: trigger?.type || "UNKNOWN",
+    cron: trigger?.cron || null,
+    scheduledTime: trigger?.scheduledTime || null,
+    openPositions: positions.length,
+    execution: "DISABLED",
+    realMoney: false,
+  });
+
+  if (!positions.length) {
+    return { checked: 0, priced: 0, exits: 0, missingPrices: 0, errors: 0 };
+  }
+
+  let priceMap;
+
+  try {
+    priceMap = await fetchDexScreenerSolPrices(
+      positions.map((position) => position.mint)
+    );
+  } catch (error) {
+    console.error({
+      message: "❌ PAPER PRICE FETCH ERROR",
+      error: String(error),
+    });
+    throw error;
+  }
+
+  let priced = 0;
+  let exits = 0;
+  let missingPrices = 0;
+  let errors = 0;
+
+  for (const position of positions) {
+    const priceInfo = priceMap.get(position.mint);
+
+    if (!priceInfo) {
+      missingPrices++;
+      console.warn({
+        message: "⚠️ PAPER PRICE UNAVAILABLE",
+        sourceSignature: position.source_signature,
+        mint: position.mint,
+        reason: "no_valid_sol_quoted_dexscreener_pair",
+      });
+      continue;
+    }
+
+    priced++;
+
+    try {
+      const result = await processPaperExitPosition(
+        env,
+        position,
+        config,
+        priceInfo
+      );
+      exits += Number(result?.exits || 0);
+    } catch (error) {
+      errors++;
+      console.error({
+        message: "❌ PAPER EXIT POSITION ERROR",
+        sourceSignature: position.source_signature,
+        mint: position.mint,
+        error: String(error),
+      });
+    }
+  }
+
+  const summary = {
+    message: "✅ PAPER EXIT TICK COMPLETE",
+    checked: positions.length,
+    priced,
+    exits,
+    missingPrices,
+    errors,
+    completedAt: new Date().toISOString(),
+  };
+
+  console.log(summary);
+
+  if (errors > 0) {
+    throw new Error(`Paper exit tick completed with ${errors} position error(s)`);
+  }
+
+  return summary;
+}
+
 async function handleWebhook(request, env) {
   let body;
 
@@ -1620,6 +2490,26 @@ async function handleWebhook(request, env) {
 }
 
 export default {
+  async scheduled(controller, env, ctx) {
+    if (!env?.DB) {
+      console.error({
+        message: "❌ DATABASE ERROR",
+        operation: "validate_database_binding_scheduled",
+        error: "env.DB is missing",
+      });
+      throw new DatabaseError(
+        "validate_database_binding_scheduled",
+        new Error("env.DB is missing")
+      );
+    }
+
+    await runPaperExitTick(env, {
+      type: "CRON",
+      cron: controller?.cron || null,
+      scheduledTime: controller?.scheduledTime || null,
+    });
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
 
@@ -1631,12 +2521,15 @@ export default {
         ok: true,
         service: "gake-trader-bot",
         status: "RUNNING",
-        version: "GAKE-D1-PAPER-COPY-V1",
-        strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_COPY_D1",
+        version: "GAKE-D1-PAPER-EXIT-V1",
+        strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_EXIT_D1",
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
+        paperExitEngine: "SL_TP_PARTIAL_TSL",
+        paperPriceSource: "DEXSCREENER_SOL_QUOTE",
+        paperExitScheduleExpected: "* * * * *",
         solUsdPricing: "COINGECKO_WITH_ACCOUNT_FALLBACK",
         execution: "DISABLED",
         realMoney: false,
