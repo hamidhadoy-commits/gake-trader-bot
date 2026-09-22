@@ -984,6 +984,7 @@ async function createPaperCopyBuy(buySignal, env) {
   if (!buySignal?.signature) return null;
 
   const sourceSignature = buySignal.signature;
+  const operationId = `PAPER_COPY_BUY:${sourceSignature}`;
   const existing = await getPaperCopyPosition(env, sourceSignature);
 
   if (existing) {
@@ -1082,7 +1083,10 @@ async function createPaperCopyBuy(buySignal, env) {
   const now = new Date().toISOString();
   const openedAt = buySignal.detectedAt || now;
   const detector = buySignal.detector || "OKX_EXACT_PATTERN";
-  const note = `Paper copy buy; sizing=${sizing.sizingMode}; SOL/USD=${solUsdPrice}; priceSource=${solUsdSource}`;
+  const note =
+    `Paper copy buy; sizing=${sizing.sizingMode}; ` +
+    `SOL/USD=${solUsdPrice}; priceSource=${solUsdSource}; ` +
+    `operationId=${operationId}`;
 
   if (!Number.isFinite(simulatedTokenAmount) || simulatedTokenAmount <= 0) {
     return {
@@ -1097,13 +1101,111 @@ async function createPaperCopyBuy(buySignal, env) {
   let batchResults;
 
   try {
+    /*
+     * IMPORTANT CONCURRENCY RULE:
+     *
+     * D1 batch() executes these statements sequentially as one transaction.
+     * The first INSERT re-checks cash, open-position count, and total exposure
+     * against the database state at commit time. If the guard does not pass,
+     * no position is inserted. The account and ledger statements are then
+     * conditional on that exact operation_id, so a blocked/duplicate INSERT
+     * cannot debit cash or create a ledger row.
+     */
     batchResults = await env.DB.batch([
       env.DB.prepare(
-        "UPDATE paper_copy_account SET cash_balance_lamports = cash_balance_lamports - ?, total_fees_lamports = total_fees_lamports + ?, opened_positions_count = opened_positions_count + 1, updated_at = ? WHERE id = 1 AND cash_balance_lamports >= ?"
-      ).bind(entryCostLamports, buyFeeLamports, now, entryCostLamports),
-
-      env.DB.prepare(
-        "INSERT INTO paper_copy_positions (source_signature, mint, detector, source_entry_price_sol_per_token, copy_notional_lamports, buy_slippage_bps, buy_fee_lamports, simulated_entry_price_sol_per_token, simulated_token_amount, remaining_token_amount, entry_cost_lamports, realized_proceeds_lamports, realized_pnl_lamports, status, opened_at, updated_at, copy_notional_usd, sol_usd_at_entry, sizing_mode, sizing_basis_lamports) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'PAPER_OPEN', ?, ?, ?, ?, ?, ?)"
+        `INSERT OR IGNORE INTO paper_copy_positions (
+          source_signature,
+          mint,
+          detector,
+          source_entry_price_sol_per_token,
+          copy_notional_lamports,
+          buy_slippage_bps,
+          buy_fee_lamports,
+          simulated_entry_price_sol_per_token,
+          simulated_token_amount,
+          remaining_token_amount,
+          entry_cost_lamports,
+          realized_proceeds_lamports,
+          realized_pnl_lamports,
+          status,
+          opened_at,
+          updated_at,
+          copy_notional_usd,
+          sol_usd_at_entry,
+          sizing_mode,
+          sizing_basis_lamports,
+          operation_id
+        )
+        SELECT
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+          0, 0, 'PAPER_OPEN',
+          ?, ?, ?, ?, ?, ?, ?
+        WHERE
+          EXISTS (
+            SELECT 1
+            FROM paper_copy_config
+            WHERE id = 1
+              AND enabled = 1
+          )
+          AND EXISTS (
+            SELECT 1
+            FROM paper_copy_account
+            WHERE id = 1
+              AND cash_balance_lamports >= ?
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM paper_copy_ledger
+            WHERE event_type = 'PAPER_BUY'
+              AND source_signature = ?
+          )
+          AND (
+            COALESCE(
+              (
+                SELECT max_open_positions
+                FROM paper_copy_config
+                WHERE id = 1
+              ),
+              0
+            ) <= 0
+            OR (
+              SELECT COUNT(*)
+              FROM paper_copy_positions
+              WHERE status = 'PAPER_OPEN'
+            ) < (
+              SELECT max_open_positions
+              FROM paper_copy_config
+              WHERE id = 1
+            )
+          )
+          AND (
+            (
+              SELECT COALESCE(
+                SUM(copy_notional_lamports),
+                0
+              )
+              FROM paper_copy_positions
+              WHERE status = 'PAPER_OPEN'
+            ) + ?
+          ) <= CAST(
+            ? * (
+              MIN(
+                10000,
+                MAX(
+                  0,
+                  COALESCE(
+                    (
+                      SELECT max_total_exposure_bps
+                      FROM paper_copy_config
+                      WHERE id = 1
+                    ),
+                    0
+                  )
+                )
+              )
+            ) / 10000
+            AS INTEGER
+          )`
       ).bind(
         sourceSignature,
         buySignal.mint,
@@ -1121,17 +1223,82 @@ async function createPaperCopyBuy(buySignal, env) {
         copyNotionalUSD,
         solUsdPrice,
         sizing.sizingMode,
+        sizing.sizingEquityLamports,
+        operationId,
+        entryCostLamports,
+        sourceSignature,
+        copyNotionalLamports,
         sizing.sizingEquityLamports
       ),
 
       env.DB.prepare(
-        "INSERT INTO paper_copy_ledger (event_type, source_signature, exit_id, cash_delta_lamports, fee_lamports, balance_after_lamports, note, created_at) VALUES ('PAPER_BUY', ?, NULL, ?, ?, (SELECT cash_balance_lamports FROM paper_copy_account WHERE id = 1), ?, ?)"
+        `UPDATE paper_copy_account
+         SET
+           cash_balance_lamports =
+             cash_balance_lamports - ?,
+           total_fees_lamports =
+             total_fees_lamports + ?,
+           opened_positions_count =
+             opened_positions_count + 1,
+           updated_at = ?
+         WHERE id = 1
+           AND EXISTS (
+             SELECT 1
+             FROM paper_copy_positions
+             WHERE operation_id = ?
+               AND source_signature = ?
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM paper_copy_ledger
+             WHERE event_type = 'PAPER_BUY'
+               AND source_signature = ?
+           )`
+      ).bind(
+        entryCostLamports,
+        buyFeeLamports,
+        now,
+        operationId,
+        sourceSignature,
+        sourceSignature
+      ),
+
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO paper_copy_ledger (
+          event_type,
+          source_signature,
+          exit_id,
+          cash_delta_lamports,
+          fee_lamports,
+          balance_after_lamports,
+          note,
+          created_at
+        )
+        SELECT
+          'PAPER_BUY',
+          ?,
+          NULL,
+          ?,
+          ?,
+          cash_balance_lamports,
+          ?,
+          ?
+        FROM paper_copy_account
+        WHERE id = 1
+          AND EXISTS (
+            SELECT 1
+            FROM paper_copy_positions
+            WHERE operation_id = ?
+              AND source_signature = ?
+          )`
       ).bind(
         sourceSignature,
         -entryCostLamports,
         buyFeeLamports,
         note,
-        now
+        now,
+        operationId,
+        sourceSignature
       ),
     ]);
   } catch (error) {
@@ -1154,32 +1321,74 @@ async function createPaperCopyBuy(buySignal, env) {
       message: "❌ DATABASE ERROR",
       operation: "create_paper_copy_buy",
       sourceSignature,
+      operationId,
       error: text,
     });
     throw new DatabaseError("create_paper_copy_buy", error);
   }
 
-  const accountChanges = Number(batchResults?.[0]?.meta?.changes ?? 0);
+  const positionChanges = Number(batchResults?.[0]?.meta?.changes ?? 0);
+  const accountChanges = Number(batchResults?.[1]?.meta?.changes ?? 0);
+  const ledgerChanges = Number(batchResults?.[2]?.meta?.changes ?? 0);
 
-  if (accountChanges !== 1) {
-    await runDatabaseOperation("cleanup_unfunded_paper_copy_buy", () =>
-      env.DB.batch([
-        env.DB.prepare(
-          "DELETE FROM paper_copy_ledger WHERE event_type = 'PAPER_BUY' AND source_signature = ?"
-        ).bind(sourceSignature),
-        env.DB.prepare(
-          "DELETE FROM paper_copy_positions WHERE source_signature = ?"
-        ).bind(sourceSignature),
-      ])
-    );
+  if (positionChanges !== 1) {
+    const duplicate = await getPaperCopyPosition(env, sourceSignature);
+
+    if (duplicate) {
+      return {
+        inserted: false,
+        duplicate: true,
+        skipped: false,
+        reason: "paper_copy_position_already_exists",
+        position: null,
+      };
+    }
+
+    const [freshAccount, freshOpenStats] = await Promise.all([
+      getPaperCopyAccount(env),
+      getOpenPaperCopyStats(env),
+    ]);
+
+    const freshSizing = buildPaperCopySizing({
+      account: freshAccount,
+      config,
+      openStats: freshOpenStats,
+      solUsdPrice,
+    });
 
     return {
       inserted: false,
       duplicate: false,
       skipped: true,
-      reason: "insufficient_cash_at_commit",
+      reason: freshSizing.ok
+        ? "risk_guard_blocked_at_commit"
+        : freshSizing.reason,
+      sizing: freshSizing,
       position: null,
     };
+  }
+
+  if (accountChanges !== 1 || ledgerChanges !== 1) {
+    const error = new Error(
+      `Paper-copy accounting invariant failed: ` +
+      `position=${positionChanges}, account=${accountChanges}, ledger=${ledgerChanges}`
+    );
+
+    console.error({
+      message: "❌ DATABASE ERROR",
+      operation: "verify_paper_copy_buy_batch",
+      sourceSignature,
+      operationId,
+      positionChanges,
+      accountChanges,
+      ledgerChanges,
+      error: String(error),
+    });
+
+    throw new DatabaseError(
+      "verify_paper_copy_buy_batch",
+      error
+    );
   }
 
   const freshAccount = await getPaperCopyAccount(env);
@@ -1194,6 +1403,7 @@ async function createPaperCopyBuy(buySignal, env) {
       action: "PAPER_COPY_BUY",
       status: "PAPER_OPEN",
       sourceSignature,
+      operationId,
       mint: buySignal.mint,
       detector,
       sizingMode: sizing.sizingMode,
@@ -1209,8 +1419,12 @@ async function createPaperCopyBuy(buySignal, env) {
       entryCostLamports,
       solUsdAtEntry: solUsdPrice,
       solUsdSource,
-      cashBalanceAfterLamports: Number(freshAccount.cash_balance_lamports || 0),
-      cashBalanceAfterSOL: lamportsToSOL(freshAccount.cash_balance_lamports || 0),
+      cashBalanceAfterLamports: Number(
+        freshAccount.cash_balance_lamports || 0
+      ),
+      cashBalanceAfterSOL: lamportsToSOL(
+        freshAccount.cash_balance_lamports || 0
+      ),
       openedAt,
       execution: "DISABLED",
       realMoney: false,
@@ -1422,6 +1636,7 @@ export default {
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
+        paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         solUsdPricing: "COINGECKO_WITH_ACCOUNT_FALLBACK",
         execution: "DISABLED",
         realMoney: false,
