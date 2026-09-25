@@ -2234,11 +2234,28 @@ async function runPaperExitTick(env, trigger = {}) {
   let priceMap;
 
   try {
-  priceMap = await fetchPaperExitSolPrices(
+  const tokenAmountsByMint = new Map();
+
+for (const position of positions) {
+  const mint = position?.mint;
+  const amount = Number(position?.remaining_token_amount || 0);
+
+  if (!mint || !Number.isFinite(amount) || amount <= 0) {
+    continue;
+  }
+
+  tokenAmountsByMint.set(
+    mint,
+    (tokenAmountsByMint.get(mint) || 0) + amount
+  );
+}
+
+priceMap = await fetchPaperExitSolPrices(
   positions.map((position) => position.mint),
   {
     wrappedSolMint: WRAPPED_SOL_MINT,
     jupiterApiKey: env?.JUPITER_API_KEY || null,
+    tokenAmountsByMint,
   }
 );
 } catch (error) {
