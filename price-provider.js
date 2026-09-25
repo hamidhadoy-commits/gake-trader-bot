@@ -13,6 +13,7 @@ const DEXSCREENER_MAX_TOKENS_PER_REQUEST = 30;
 const PRICE_FETCH_TIMEOUT_MS = 7000;
 const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
+const JUPITER_CAPACITY_PROBE_FRACTIONS = [1, 0.3, 0.1, 0.01];
 
 let lastJupiterRequestStartedAt = 0;
 
@@ -106,20 +107,21 @@ async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
 
     let responseBody = null;
 
-try {
-  responseBody = await response.text();
-} catch (bodyError) {
-  responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
-}
+    try {
+      responseBody = await response.text();
+    } catch (bodyError) {
+      responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
+    }
 
-console.warn({
-  message: `⚠️ ${logPrefix} ERROR`,
-  reason: "http_error",
-  status: response.status,
-  responseBody,
-});
-return null;
+    console.warn({
+      message: `⚠️ ${logPrefix} ERROR`,
+      reason: "http_error",
+      status: response.status,
+      responseBody,
+    });
+    return null;
   }
+
   return null;
 }
 
@@ -299,6 +301,159 @@ function getTokenAmountForMint(tokenAmountsByMint, mint) {
   return 0;
 }
 
+
+async function runJupiterSwapCapacityProbe({
+  mint,
+  wrappedSolMint,
+  jupiterApiKey,
+  humanAmount,
+  decimals,
+}) {
+  if (
+    !mint ||
+    !wrappedSolMint ||
+    !jupiterApiKey ||
+    !Number.isFinite(Number(humanAmount)) ||
+    Number(humanAmount) <= 0 ||
+    !Number.isInteger(decimals)
+  ) {
+    console.warn({
+      message: "🧪 JUPITER SWAP CAPACITY PROBE SKIPPED",
+      mint,
+      reason: "invalid_probe_inputs",
+      humanAmount,
+      decimals,
+      execution: "DISABLED",
+      realMoney: false,
+    });
+    return;
+  }
+
+  for (const fraction of JUPITER_CAPACITY_PROBE_FRACTIONS) {
+    const probeHumanAmount = Number(humanAmount) * fraction;
+    const probeRawAmount = humanAmountToRaw(probeHumanAmount, decimals);
+
+    if (!probeRawAmount) {
+      console.warn({
+        message: "🧪 JUPITER SWAP CAPACITY PROBE",
+        mint,
+        percent: fraction * 100,
+        quoteAvailable: false,
+        reason: "invalid_probe_amount",
+        execution: "DISABLED",
+        realMoney: false,
+      });
+      continue;
+    }
+
+    const url =
+      `${JUPITER_SWAP_ORDER_URL}?` +
+      new URLSearchParams({
+        inputMint: mint,
+        outputMint: wrappedSolMint,
+        amount: probeRawAmount,
+      }).toString();
+
+    let response = null;
+
+    try {
+      response = await fetchJupiterWithPacing(url, jupiterApiKey);
+    } catch (error) {
+      console.warn({
+        message: "🧪 JUPITER SWAP CAPACITY PROBE",
+        mint,
+        percent: fraction * 100,
+        inputTokenAmount: probeHumanAmount,
+        inputRawAmount: probeRawAmount,
+        quoteAvailable: false,
+        reason: "network_or_timeout",
+        error: String(error),
+        execution: "DISABLED",
+        realMoney: false,
+      });
+      continue;
+    }
+
+    if (!response.ok) {
+      let responseBody = null;
+
+      try {
+        responseBody = await response.text();
+      } catch (bodyError) {
+        responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
+      }
+
+      console.warn({
+        message: "🧪 JUPITER SWAP CAPACITY PROBE",
+        mint,
+        percent: fraction * 100,
+        inputTokenAmount: probeHumanAmount,
+        inputRawAmount: probeRawAmount,
+        quoteAvailable: false,
+        status: response.status,
+        responseBody,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+      continue;
+    }
+
+    try {
+      const payload = await response.json();
+      const outAmountLamports = Number(payload?.outAmount);
+      const quoteAvailable =
+        Number.isFinite(outAmountLamports) && outAmountLamports > 0;
+
+      const outSOL = quoteAvailable
+        ? outAmountLamports / 1_000_000_000
+        : null;
+
+      const impliedPriceSOLPerToken =
+        quoteAvailable && probeHumanAmount > 0
+          ? outSOL / probeHumanAmount
+          : null;
+
+      console.log({
+        message: "🧪 JUPITER SWAP CAPACITY PROBE",
+        mint,
+        percent: fraction * 100,
+        inputTokenAmount: probeHumanAmount,
+        inputRawAmount: probeRawAmount,
+        quoteAvailable,
+        status: response.status,
+        outAmountLamports: quoteAvailable ? outAmountLamports : null,
+        outSOL,
+        impliedPriceSOLPerToken,
+        router: payload?.router || null,
+        requestId: payload?.requestId || null,
+        errorCode: payload?.errorCode ?? null,
+        errorMessage: payload?.errorMessage || payload?.error || null,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+
+      // Descending probe: once a size works, smaller probes are unnecessary.
+      if (quoteAvailable) {
+        break;
+      }
+    } catch (error) {
+      console.warn({
+        message: "🧪 JUPITER SWAP CAPACITY PROBE",
+        mint,
+        percent: fraction * 100,
+        inputTokenAmount: probeHumanAmount,
+        inputRawAmount: probeRawAmount,
+        quoteAvailable: false,
+        status: response.status,
+        reason: "invalid_json",
+        error: String(error),
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    }
+  }
+}
+
 async function fetchJupiterSwapQuoteSolPrices(
   mints,
   wrappedSolMint,
@@ -357,7 +512,16 @@ async function fetchJupiterSwapQuoteSolPrices(
       "JUPITER SWAP QUOTE"
     );
 
-    if (!response) continue;
+    if (!response) {
+      await runJupiterSwapCapacityProbe({
+        mint,
+        wrappedSolMint,
+        jupiterApiKey,
+        humanAmount,
+        decimals,
+      });
+      continue;
+    }
 
     try {
       const payload = await response.json();
