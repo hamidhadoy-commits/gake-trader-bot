@@ -1,3 +1,4 @@
+import { fetchPaperExitSolPrices } from "./price-provider.js";
 const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -2111,6 +2112,7 @@ async function processPaperExitPosition(env, rawPosition, config, priceInfo) {
     pairAddress: priceInfo?.pairAddress || null,
     dexId: priceInfo?.dexId || null,
     liquidityUSD: Number(priceInfo?.liquidityUSD || 0),
+    priceSource: priceInfo?.source || null,
   });
 
   let exits = 0;
@@ -2232,15 +2234,17 @@ async function runPaperExitTick(env, trigger = {}) {
   let priceMap;
 
   try {
-    priceMap = await fetchDexScreenerSolPrices(
-      positions.map((position) => position.mint)
-    );
-  } catch (error) {
-    console.error({
-      message: "❌ PAPER PRICE FETCH ERROR",
-      error: String(error),
-    });
-    throw error;
+  priceMap = await fetchPaperExitSolPrices(
+    positions.map((position) => position.mint),
+    { wrappedSolMint: WRAPPED_SOL_MINT }
+  );
+} catch (error) {
+  console.error({
+    message: "❌ PAPER PRICE FETCH ERROR",
+    error: String(error),
+    behavior: "continue_with_no_prices",
+  });
+  priceMap = new Map();
   }
 
   let priced = 0;
@@ -2257,7 +2261,7 @@ async function runPaperExitTick(env, trigger = {}) {
         message: "⚠️ PAPER PRICE UNAVAILABLE",
         sourceSignature: position.source_signature,
         mint: position.mint,
-        reason: "no_valid_sol_quoted_dexscreener_pair",
+        reason: "no_price_from_any_provider",
       });
       continue;
     }
@@ -2521,14 +2525,14 @@ export default {
         ok: true,
         service: "gake-trader-bot",
         status: "RUNNING",
-        version: "GAKE-D1-PAPER-EXIT-V1",
+        version: "GAKE-D1-PAPER-PRICE-FALLBACK-V1",
         strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_EXIT_D1",
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
-        paperPriceSource: "DEXSCREENER_SOL_QUOTE",
+        paperPriceSource: "DEXSCREENER_THEN_GECKOTERMINAL",
         paperExitScheduleExpected: "* * * * *",
         solUsdPricing: "COINGECKO_WITH_ACCOUNT_FALLBACK",
         execution: "DISABLED",
