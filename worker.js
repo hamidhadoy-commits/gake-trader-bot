@@ -2699,7 +2699,29 @@ export default {
         serverTime: new Date().toISOString(),
       });
     }
+if (
+  request.method === "GET" &&
+  url.pathname === "/__test-coingecko"
+) {
+  const prices = await fetchPaperExitSolPrices(
+    [WRAPPED_SOL_MINT],
+    {
+      wrappedSolMint: WRAPPED_SOL_MINT,
+      coingeckoApiKey: env?.COINGECKO_API_KEY || null,
+    }
+  );
 
+  const price = prices.get(WRAPPED_SOL_MINT) || null;
+
+  return jsonResponse({
+    ok: Boolean(price),
+    test: "COINGECKO_MARK_PRICE",
+    mint: WRAPPED_SOL_MINT,
+    result: price,
+    execution: "DISABLED",
+    realMoney: false,
+  });
+  }
     if (request.method === "POST") {
       if (!env?.DB) {
         console.error({
