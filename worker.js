@@ -1,4 +1,7 @@
-import { fetchPaperExitSolPrices } from "./price-provider.js";
+import {
+  fetchPaperExitSolPrices,
+  fetchJupiterExecutableSellQuote,
+} from "./price-provider.js";
 const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -1665,7 +1668,8 @@ async function executePaperCopyExit({
   position,
   config,
   exitReason,
-  triggerPriceSOLPerToken,
+    triggerPriceSOLPerToken,
+  executionPriceSOLPerToken = null,
   soldTokenAmount,
   closePosition,
   markTakeProfit,
@@ -1708,13 +1712,30 @@ async function executePaperCopyExit({
     0,
     Math.floor(Number(config?.sell_fee_lamports || 0))
   );
-  const simulatedExitPriceSOLPerToken =
-    triggerPriceSOLPerToken *
-    (1 - sellSlippageBps / BPS_DENOMINATOR);
+  const executableBasePriceSOLPerToken = Number(
+  executionPriceSOLPerToken || triggerPriceSOLPerToken
+);
+
+if (
+  !Number.isFinite(executableBasePriceSOLPerToken) ||
+  executableBasePriceSOLPerToken <= 0
+) {
+  return {
+    inserted: false,
+    skipped: true,
+    reason: "invalid_executable_exit_price",
+  };
+}
+
+const simulatedExitPriceSOLPerToken =
+  executableBasePriceSOLPerToken *
+  (1 - sellSlippageBps / BPS_DENOMINATOR);
 
   const grossProceedsLamports = Math.floor(
-    tokensToSell * triggerPriceSOLPerToken * LAMPORTS_PER_SOL
-  );
+  tokensToSell *
+    executableBasePriceSOLPerToken *
+    LAMPORTS_PER_SOL
+);
   const postSlippageProceedsLamports = Math.floor(
     tokensToSell * simulatedExitPriceSOLPerToken * LAMPORTS_PER_SOL
   );
@@ -2078,7 +2099,56 @@ async function executePaperCopyExit({
     },
   };
 }
+async function getPaperExitExecutableQuote({
+  env,
+  position,
+  tokenAmount,
+  exitReason,
+}) {
+  const sourceSignature = position?.source_signature || null;
+  const mint = position?.mint || null;
+  const amount = Number(tokenAmount || 0);
 
+  const quote = await fetchJupiterExecutableSellQuote({
+    mint,
+    tokenAmount: amount,
+    wrappedSolMint: WRAPPED_SOL_MINT,
+    jupiterApiKey: env?.JUPITER_API_KEY || null,
+  });
+
+  if (!quote?.executable) {
+    console.warn({
+      message: "⛔ PAPER EXIT BLOCKED NO ROUTE",
+      sourceSignature,
+      mint,
+      exitReason,
+      tokenAmount: amount,
+      reason: quote?.reason || "quote_unavailable",
+      status: quote?.status ?? null,
+      responseBody: quote?.responseBody ?? null,
+      execution: "DISABLED",
+      realMoney: false,
+    });
+
+    return null;
+  }
+
+  console.log({
+    message: "✅ PAPER EXIT EXECUTABLE QUOTE",
+    sourceSignature,
+    mint,
+    exitReason,
+    tokenAmount: amount,
+    quotedTokenAmount: quote.quotedTokenAmount,
+    outSOL: quote.outSOL,
+    effectivePriceSOLPerToken: quote.effectivePriceSOLPerToken,
+    router: quote.router || null,
+    execution: "DISABLED",
+    realMoney: false,
+  });
+
+  return quote;
+      }
 async function processPaperExitPosition(env, rawPosition, config, priceInfo) {
   const sourceSignature = rawPosition?.source_signature || null;
   const observedPrice = Number(priceInfo?.priceSOLPerToken || 0);
@@ -2118,23 +2188,38 @@ async function processPaperExitPosition(env, rawPosition, config, priceInfo) {
   let exits = 0;
 
   if (observedPrice <= thresholds.stopLossPrice) {
-    const result = await executePaperCopyExit({
-      env,
-      position,
-      config,
-      exitReason: "STOP_LOSS",
-      triggerPriceSOLPerToken: observedPrice,
-      soldTokenAmount: Number(position.remaining_token_amount || 0),
-      closePosition: true,
-      markTakeProfit: false,
-    });
+  const tokenAmount = Number(position.remaining_token_amount || 0);
 
-    if (result?.inserted && result.exit) {
-      exits++;
-      console.log(result.exit);
-    }
+  const executableQuote = await getPaperExitExecutableQuote({
+    env,
+    position,
+    tokenAmount,
+    exitReason: "STOP_LOSS",
+  });
 
-    return { exits, skipped: result?.inserted ? 0 : 1 };
+  if (!executableQuote) {
+    return { exits, skipped: 1 };
+  }
+
+  const result = await executePaperCopyExit({
+    env,
+    position,
+    config,
+    exitReason: "STOP_LOSS",
+    triggerPriceSOLPerToken: observedPrice,
+    executionPriceSOLPerToken:
+      executableQuote.effectivePriceSOLPerToken,
+    soldTokenAmount: tokenAmount,
+    closePosition: true,
+    markTakeProfit: false,
+  });
+
+  if (result?.inserted && result.exit) {
+    exits++;
+    console.log(result.exit);
+  }
+    
+  return { exits, skipped: result?.inserted ? 0 : 1 };
   }
 
   const takeProfitEnabled = Number(config?.take_profit_enabled || 0) === 1;
@@ -2144,67 +2229,113 @@ async function processPaperExitPosition(env, rawPosition, config, priceInfo) {
     0,
     BPS_DENOMINATOR
   );
-
   if (
-    takeProfitEnabled &&
-    !takeProfitHit &&
-    takeProfitSellBps > 0 &&
-    observedPrice >= thresholds.takeProfitPrice
-  ) {
-    const targetSellAmount =
-      Number(position.simulated_token_amount || 0) *
-      (takeProfitSellBps / BPS_DENOMINATOR);
+  takeProfitEnabled &&
+  !takeProfitHit &&
+  takeProfitSellBps > 0 &&
+  observedPrice >= thresholds.takeProfitPrice
+) {
+  const targetSellAmount =
+    Number(position.simulated_token_amount || 0) *
+    (takeProfitSellBps / BPS_DENOMINATOR);
 
-    const result = await executePaperCopyExit({
-      env,
-      position,
-      config,
-      exitReason: "TAKE_PROFIT_PARTIAL",
-      triggerPriceSOLPerToken: observedPrice,
-      soldTokenAmount: targetSellAmount,
-      closePosition: targetSellAmount >= Number(position.remaining_token_amount || 0),
-      markTakeProfit: true,
-    });
+  const tokenAmount = Math.min(
+    targetSellAmount,
+    Number(position.remaining_token_amount || 0)
+  );
 
-    if (result?.inserted && result.exit) {
-      exits++;
-      console.log(result.exit);
-    }
+  const executableQuote = await getPaperExitExecutableQuote({
+    env,
+    position,
+    tokenAmount,
+    exitReason: "TAKE_PROFIT_PARTIAL",
+  });
 
-    position = await getPaperExitPosition(env, sourceSignature);
-    if (!position || position.status !== "PAPER_OPEN") {
-      return { exits, skipped: 0 };
-    }
-
-    thresholds = buildPaperExitThresholds(position, config, observedPrice);
-    if (!thresholds) return { exits, skipped: 1 };
+  if (!executableQuote) {
+    return { exits, skipped: 1 };
   }
 
-  const trailingStopEnabled = Number(config?.trailing_stop_enabled || 0) === 1;
+  const result = await executePaperCopyExit({
+    env,
+    position,
+    config,
+    exitReason: "TAKE_PROFIT_PARTIAL",
+    triggerPriceSOLPerToken: observedPrice,
+    executionPriceSOLPerToken:
+      executableQuote.effectivePriceSOLPerToken,
+    soldTokenAmount: tokenAmount,
+    closePosition:
+      tokenAmount >= Number(position.remaining_token_amount || 0),
+    markTakeProfit: true,
+  });
 
-  if (
-    trailingStopEnabled &&
-    Number(config?.trailing_stop_bps || 0) > 0 &&
-    observedPrice <= thresholds.trailingStopPrice
-  ) {
-    const result = await executePaperCopyExit({
-      env,
-      position,
-      config,
-      exitReason: "TRAILING_STOP",
-      triggerPriceSOLPerToken: observedPrice,
-      soldTokenAmount: Number(position.remaining_token_amount || 0),
-      closePosition: true,
-      markTakeProfit: false,
-    });
-
-    if (result?.inserted && result.exit) {
-      exits++;
-      console.log(result.exit);
-    }
-
-    return { exits, skipped: result?.inserted ? 0 : 1 };
+  if (result?.inserted && result.exit) {
+    exits++;
+    console.log(result.exit);
   }
+
+  position = await getPaperExitPosition(env, sourceSignature);
+
+  if (!position || position.status !== "PAPER_OPEN") {
+    return { exits, skipped: 0 };
+  }
+
+  thresholds = buildPaperExitThresholds(
+    position,
+    config,
+    observedPrice
+  );
+
+  if (!thresholds) {
+    return { exits, skipped: 1 };
+  }
+      }
+const trailingStopEnabled =
+  Number(config?.trailing_stop_enabled || 0) === 1;
+
+if (
+  trailingStopEnabled &&
+  Number(config?.trailing_stop_bps || 0) > 0 &&
+  observedPrice <= thresholds.trailingStopPrice
+) {
+  const tokenAmount = Number(
+    position.remaining_token_amount || 0
+  );
+
+  const executableQuote = await getPaperExitExecutableQuote({
+    env,
+    position,
+    tokenAmount,
+    exitReason: "TRAILING_STOP",
+  });
+
+  if (!executableQuote) {
+    return { exits, skipped: 1 };
+  }
+
+  const result = await executePaperCopyExit({
+    env,
+    position,
+    config,
+    exitReason: "TRAILING_STOP",
+    triggerPriceSOLPerToken: observedPrice,
+    executionPriceSOLPerToken:
+      executableQuote.effectivePriceSOLPerToken,
+    soldTokenAmount: tokenAmount,
+    closePosition: true,
+    markTakeProfit: false,
+  });
+
+  if (result?.inserted && result.exit) {
+    exits++;
+    console.log(result.exit);
+  }
+
+  return {
+    exits,
+    skipped: result?.inserted ? 0 : 1,
+  };
+}
 
   return { exits, skipped: 0 };
 }
@@ -2545,14 +2676,14 @@ export default {
         ok: true,
         service: "gake-trader-bot",
         status: "RUNNING",
-        version: "GAKE-D1-PAPER-PRICE-SWAP-FALLBACK-V1",
+        version: "GAKE-D1-PAPER-MARK-EXECUTABILITY-V1",
         strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_EXIT_D1",
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
-        paperPriceSource: "JUPITER_PRICE_THEN_SWAP_V2_THEN_DEXSCREENER",
+        paperPriceSource: "GECKOTERMINAL_MARK_THEN_JUPITER_EXECUTABILITY",
         jupiterApiKey:
   env?.JUPITER_API_KEY ? "CONFIGURED" : "MISSING",
         paperExitScheduleExpected: "* * * * *",
