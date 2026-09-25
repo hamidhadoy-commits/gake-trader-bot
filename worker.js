@@ -2099,6 +2099,120 @@ const simulatedExitPriceSOLPerToken =
     },
   };
 }
+async function recordPaperExitNoRoute({
+  env,
+  position,
+  exitReason,
+  tokenAmount,
+  quote,
+}) {
+  const sourceSignature =
+    position?.source_signature || null;
+  const mint = position?.mint || null;
+  const amount = Number(tokenAmount || 0);
+
+  if (
+    !env?.DB ||
+    !sourceSignature ||
+    !mint ||
+    !exitReason
+  ) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+
+  await runDatabaseOperation(
+    "record_paper_exit_no_route",
+    () =>
+      env.DB.prepare(
+        `INSERT INTO paper_exit_blocks (
+           source_signature,
+           mint,
+           exit_reason,
+           token_amount,
+           raw_amount,
+           decimals,
+           block_reason,
+           http_status,
+           response_body,
+           first_seen_at,
+           last_seen_at,
+           attempt_count,
+           resolved_at
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL)
+         ON CONFLICT(source_signature, exit_reason)
+         DO UPDATE SET
+           mint = excluded.mint,
+           token_amount = excluded.token_amount,
+           raw_amount = excluded.raw_amount,
+           decimals = excluded.decimals,
+           block_reason = excluded.block_reason,
+           http_status = excluded.http_status,
+           response_body = excluded.response_body,
+           last_seen_at = excluded.last_seen_at,
+           attempt_count =
+             paper_exit_blocks.attempt_count + 1,
+           resolved_at = NULL`
+      )
+        .bind(
+          sourceSignature,
+          mint,
+          exitReason,
+          amount,
+          quote?.rawAmount != null
+            ? String(quote.rawAmount)
+            : null,
+          Number.isInteger(quote?.decimals)
+            ? quote.decimals
+            : null,
+          quote?.reason || "no_route",
+          quote?.status ?? null,
+          quote?.responseBody ?? null,
+          now,
+          now
+        )
+        .run()
+  );
+}
+
+async function resolvePaperExitNoRoute({
+  env,
+  position,
+  exitReason,
+}) {
+  const sourceSignature =
+    position?.source_signature || null;
+
+  if (
+    !env?.DB ||
+    !sourceSignature ||
+    !exitReason
+  ) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+
+  await runDatabaseOperation(
+    "resolve_paper_exit_no_route",
+    () =>
+      env.DB.prepare(
+        `UPDATE paper_exit_blocks
+         SET resolved_at = ?
+         WHERE source_signature = ?
+           AND exit_reason = ?
+           AND resolved_at IS NULL`
+      )
+        .bind(
+          now,
+          sourceSignature,
+          exitReason
+        )
+        .run()
+  );
+    }
 async function getPaperExitExecutableQuote({
   env,
   position,
@@ -2117,11 +2231,24 @@ async function getPaperExitExecutableQuote({
   });
 
   if (!quote?.executable) {
+    if (quote?.reason === "no_route") {
+  await recordPaperExitNoRoute({
+    env,
+    position,
+    exitReason,
+    tokenAmount: amount,
+    quote,
+  });
+    }
     console.warn({
       message: "⛔ PAPER EXIT BLOCKED NO ROUTE",
       sourceSignature,
       mint,
       exitReason,
+      blockState:
+  quote?.reason === "no_route"
+    ? "EXIT_BLOCKED_NO_ROUTE"
+    : null,
       tokenAmount: amount,
       reason: quote?.reason || "quote_unavailable",
       status: quote?.status ?? null,
@@ -2132,7 +2259,11 @@ async function getPaperExitExecutableQuote({
 
     return null;
   }
-
+await resolvePaperExitNoRoute({
+  env,
+  position,
+  exitReason,
+});
   console.log({
     message: "✅ PAPER EXIT EXECUTABLE QUOTE",
     sourceSignature,
