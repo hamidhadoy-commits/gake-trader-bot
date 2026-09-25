@@ -2699,45 +2699,6 @@ export default {
         serverTime: new Date().toISOString(),
       });
     }
-if (
-  request.method === "GET" &&
-  url.pathname === "/__test-coingecko"
-) {
-  const mint =
-    String(url.searchParams.get("mint") || "").trim();
-
-  if (!mint) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: "missing_mint",
-        usage: "/__test-coingecko?mint=SOLANA_TOKEN_MINT",
-        execution: "DISABLED",
-        realMoney: false,
-      },
-      400
-    );
-  }
-
-  const prices = await fetchPaperExitSolPrices(
-    [mint],
-    {
-      wrappedSolMint: WRAPPED_SOL_MINT,
-      coingeckoApiKey: env?.COINGECKO_API_KEY || null,
-    }
-  );
-
-  const price = prices.get(mint) || null;
-
-  return jsonResponse({
-    ok: Boolean(price),
-    test: "COINGECKO_REAL_MINT_MARK_PRICE",
-    mint,
-    result: price,
-    execution: "DISABLED",
-    realMoney: false,
-  });
-}
     if (request.method === "POST") {
       if (!env?.DB) {
         console.error({
