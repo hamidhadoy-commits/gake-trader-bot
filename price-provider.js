@@ -6,14 +6,16 @@ const JUPITER_TOKENS_SEARCH_URL = "https://api.jup.ag/tokens/v2/search";
 const JUPITER_SWAP_ORDER_URL = "https://api.jup.ag/swap/v2/order";
 const DEXSCREENER_TOKEN_URL_PREFIX =
   "https://api.dexscreener.com/tokens/v1/solana/";
+const GECKOTERMINAL_SIMPLE_PRICE_URL_PREFIX =
+  "https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/";
 
 const JUPITER_MAX_TARGET_MINTS_PER_REQUEST = 49;
 const JUPITER_TOKENS_MAX_MINTS_PER_REQUEST = 100;
 const DEXSCREENER_MAX_TOKENS_PER_REQUEST = 30;
+const GECKOTERMINAL_MAX_TARGET_MINTS_PER_REQUEST = 29;
 const PRICE_FETCH_TIMEOUT_MS = 7000;
 const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
-const JUPITER_CAPACITY_PROBE_FRACTIONS = [1, 0.3, 0.1, 0.01];
 
 let lastJupiterRequestStartedAt = 0;
 
@@ -301,159 +303,6 @@ function getTokenAmountForMint(tokenAmountsByMint, mint) {
   return 0;
 }
 
-
-async function runJupiterSwapCapacityProbe({
-  mint,
-  wrappedSolMint,
-  jupiterApiKey,
-  humanAmount,
-  decimals,
-}) {
-  if (
-    !mint ||
-    !wrappedSolMint ||
-    !jupiterApiKey ||
-    !Number.isFinite(Number(humanAmount)) ||
-    Number(humanAmount) <= 0 ||
-    !Number.isInteger(decimals)
-  ) {
-    console.warn({
-      message: "🧪 JUPITER SWAP CAPACITY PROBE SKIPPED",
-      mint,
-      reason: "invalid_probe_inputs",
-      humanAmount,
-      decimals,
-      execution: "DISABLED",
-      realMoney: false,
-    });
-    return;
-  }
-
-  for (const fraction of JUPITER_CAPACITY_PROBE_FRACTIONS) {
-    const probeHumanAmount = Number(humanAmount) * fraction;
-    const probeRawAmount = humanAmountToRaw(probeHumanAmount, decimals);
-
-    if (!probeRawAmount) {
-      console.warn({
-        message: "🧪 JUPITER SWAP CAPACITY PROBE",
-        mint,
-        percent: fraction * 100,
-        quoteAvailable: false,
-        reason: "invalid_probe_amount",
-        execution: "DISABLED",
-        realMoney: false,
-      });
-      continue;
-    }
-
-    const url =
-      `${JUPITER_SWAP_ORDER_URL}?` +
-      new URLSearchParams({
-        inputMint: mint,
-        outputMint: wrappedSolMint,
-        amount: probeRawAmount,
-      }).toString();
-
-    let response = null;
-
-    try {
-      response = await fetchJupiterWithPacing(url, jupiterApiKey);
-    } catch (error) {
-      console.warn({
-        message: "🧪 JUPITER SWAP CAPACITY PROBE",
-        mint,
-        percent: fraction * 100,
-        inputTokenAmount: probeHumanAmount,
-        inputRawAmount: probeRawAmount,
-        quoteAvailable: false,
-        reason: "network_or_timeout",
-        error: String(error),
-        execution: "DISABLED",
-        realMoney: false,
-      });
-      continue;
-    }
-
-    if (!response.ok) {
-      let responseBody = null;
-
-      try {
-        responseBody = await response.text();
-      } catch (bodyError) {
-        responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
-      }
-
-      console.warn({
-        message: "🧪 JUPITER SWAP CAPACITY PROBE",
-        mint,
-        percent: fraction * 100,
-        inputTokenAmount: probeHumanAmount,
-        inputRawAmount: probeRawAmount,
-        quoteAvailable: false,
-        status: response.status,
-        responseBody,
-        execution: "DISABLED",
-        realMoney: false,
-      });
-      continue;
-    }
-
-    try {
-      const payload = await response.json();
-      const outAmountLamports = Number(payload?.outAmount);
-      const quoteAvailable =
-        Number.isFinite(outAmountLamports) && outAmountLamports > 0;
-
-      const outSOL = quoteAvailable
-        ? outAmountLamports / 1_000_000_000
-        : null;
-
-      const impliedPriceSOLPerToken =
-        quoteAvailable && probeHumanAmount > 0
-          ? outSOL / probeHumanAmount
-          : null;
-
-      console.log({
-        message: "🧪 JUPITER SWAP CAPACITY PROBE",
-        mint,
-        percent: fraction * 100,
-        inputTokenAmount: probeHumanAmount,
-        inputRawAmount: probeRawAmount,
-        quoteAvailable,
-        status: response.status,
-        outAmountLamports: quoteAvailable ? outAmountLamports : null,
-        outSOL,
-        impliedPriceSOLPerToken,
-        router: payload?.router || null,
-        requestId: payload?.requestId || null,
-        errorCode: payload?.errorCode ?? null,
-        errorMessage: payload?.errorMessage || payload?.error || null,
-        execution: "DISABLED",
-        realMoney: false,
-      });
-
-      // Descending probe: once a size works, smaller probes are unnecessary.
-      if (quoteAvailable) {
-        break;
-      }
-    } catch (error) {
-      console.warn({
-        message: "🧪 JUPITER SWAP CAPACITY PROBE",
-        mint,
-        percent: fraction * 100,
-        inputTokenAmount: probeHumanAmount,
-        inputRawAmount: probeRawAmount,
-        quoteAvailable: false,
-        status: response.status,
-        reason: "invalid_json",
-        error: String(error),
-        execution: "DISABLED",
-        realMoney: false,
-      });
-    }
-  }
-}
-
 async function fetchJupiterSwapQuoteSolPrices(
   mints,
   wrappedSolMint,
@@ -512,16 +361,7 @@ async function fetchJupiterSwapQuoteSolPrices(
       "JUPITER SWAP QUOTE"
     );
 
-    if (!response) {
-      await runJupiterSwapCapacityProbe({
-        mint,
-        wrappedSolMint,
-        jupiterApiKey,
-        humanAmount,
-        decimals,
-      });
-      continue;
-    }
+    if (!response) continue;
 
     try {
       const payload = await response.json();
@@ -597,6 +437,325 @@ async function fetchJupiterSwapQuoteSolPrices(
   }
 
   return prices;
+}
+
+
+async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
+  const uniqueMints = [...new Set((mints || []).filter(Boolean))];
+  const prices = new Map();
+
+  for (
+    let offset = 0;
+    offset < uniqueMints.length;
+    offset += GECKOTERMINAL_MAX_TARGET_MINTS_PER_REQUEST
+  ) {
+    const chunk = uniqueMints.slice(
+      offset,
+      offset + GECKOTERMINAL_MAX_TARGET_MINTS_PER_REQUEST
+    );
+
+    if (!chunk.length) continue;
+
+    const addresses = [...new Set([...chunk, wrappedSolMint])];
+    const url =
+      GECKOTERMINAL_SIMPLE_PRICE_URL_PREFIX +
+      addresses.map((address) => encodeURIComponent(address)).join(",");
+
+    let response = null;
+
+    try {
+      response = await fetchWithTimeout(url, {
+        method: "GET",
+        headers: {
+          accept: "application/json;version=20230203",
+        },
+      });
+    } catch (error) {
+      console.warn({
+        message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+        reason: "network_or_timeout",
+        error: String(error),
+      });
+      continue;
+    }
+
+    if (response.status === 429) {
+      console.warn({
+        message: "⚠️ GECKOTERMINAL MARK PRICE RATE LIMITED",
+        status: response.status,
+        behavior: "positions_without_mark_price_will_be_skipped",
+      });
+      break;
+    }
+
+    if (!response.ok) {
+      let responseBody = null;
+
+      try {
+        responseBody = await response.text();
+      } catch (bodyError) {
+        responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
+      }
+
+      console.warn({
+        message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+        reason: "http_error",
+        status: response.status,
+        responseBody,
+      });
+      continue;
+    }
+
+    try {
+      const payload = await response.json();
+      const tokenPrices = payload?.data?.attributes?.token_prices || {};
+      const solUsdPrice = Number(tokenPrices?.[wrappedSolMint]);
+
+      if (!Number.isFinite(solUsdPrice) || solUsdPrice <= 0) {
+        console.warn({
+          message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+          reason: "missing_wsol_price",
+        });
+        continue;
+      }
+
+      for (const mint of chunk) {
+        const tokenUsdPrice = Number(tokenPrices?.[mint]);
+
+        if (!Number.isFinite(tokenUsdPrice) || tokenUsdPrice <= 0) {
+          continue;
+        }
+
+        const priceSOLPerToken = tokenUsdPrice / solUsdPrice;
+
+        if (!Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) {
+          continue;
+        }
+
+        prices.set(mint, {
+          priceSOLPerToken,
+          liquidityUSD: 0,
+          pairAddress: null,
+          dexId: "GECKOTERMINAL_SIMPLE",
+          url: null,
+          source: "GECKOTERMINAL_MARK_USD_RATIO",
+          tokenUsdPrice,
+          solUsdPrice,
+        });
+      }
+    } catch (error) {
+      console.warn({
+        message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+        reason: "invalid_json",
+        error: String(error),
+      });
+    }
+  }
+
+  return prices;
+}
+
+export async function fetchJupiterExecutableSellQuote({
+  mint,
+  tokenAmount,
+  wrappedSolMint = DEFAULT_WRAPPED_SOL_MINT,
+  jupiterApiKey = null,
+} = {}) {
+  const amount = Number(tokenAmount);
+
+  if (!mint) {
+    return { executable: false, reason: "missing_mint" };
+  }
+
+  if (!jupiterApiKey) {
+    return { executable: false, reason: "missing_api_key", mint };
+  }
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return {
+      executable: false,
+      reason: "invalid_token_amount",
+      mint,
+      tokenAmount: amount,
+    };
+  }
+
+  const decimalsByMint = await fetchJupiterTokenDecimals(
+    [mint],
+    jupiterApiKey
+  );
+  const decimals = decimalsByMint.get(mint);
+
+  if (!Number.isInteger(decimals)) {
+    return {
+      executable: false,
+      reason: "missing_token_decimals",
+      mint,
+      tokenAmount: amount,
+    };
+  }
+
+  const rawAmount = humanAmountToRaw(amount, decimals);
+
+  if (!rawAmount) {
+    return {
+      executable: false,
+      reason: "invalid_quote_amount",
+      mint,
+      tokenAmount: amount,
+      decimals,
+    };
+  }
+
+  const url =
+    `${JUPITER_SWAP_ORDER_URL}?` +
+    new URLSearchParams({
+      inputMint: mint,
+      outputMint: wrappedSolMint,
+      amount: rawAmount,
+    }).toString();
+
+  let response = null;
+
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      response = await fetchJupiterWithPacing(url, jupiterApiKey);
+    } catch (error) {
+      if (attempt < RETRY_DELAYS_MS.length) {
+        const delayMs = RETRY_DELAYS_MS[attempt];
+        await sleep(delayMs);
+        continue;
+      }
+
+      return {
+        executable: false,
+        reason: "network_or_timeout",
+        mint,
+        tokenAmount: amount,
+        rawAmount,
+        decimals,
+        error: String(error),
+      };
+    }
+
+    if (response.ok) break;
+
+    let responseBody = null;
+
+    try {
+      responseBody = await response.text();
+    } catch (bodyError) {
+      responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
+    }
+
+    if (
+      (response.status === 429 || response.status >= 500) &&
+      attempt < RETRY_DELAYS_MS.length
+    ) {
+      const delayMs = RETRY_DELAYS_MS[attempt];
+      await sleep(delayMs);
+      continue;
+    }
+
+    const noRoute =
+      response.status === 400 &&
+      /failed to get quotes/i.test(String(responseBody || ""));
+
+    return {
+      executable: false,
+      reason: noRoute ? "no_route" : "http_error",
+      mint,
+      tokenAmount: amount,
+      rawAmount,
+      decimals,
+      status: response.status,
+      responseBody,
+    };
+  }
+
+  if (!response?.ok) {
+    return {
+      executable: false,
+      reason: "quote_provider_unavailable",
+      mint,
+      tokenAmount: amount,
+      rawAmount,
+      decimals,
+      status: response?.status ?? null,
+    };
+  }
+
+  try {
+    const payload = await response.json();
+    const outAmountLamports = Number(payload?.outAmount);
+
+    if (!Number.isFinite(outAmountLamports) || outAmountLamports <= 0) {
+      return {
+        executable: false,
+        reason: "missing_or_invalid_out_amount",
+        mint,
+        tokenAmount: amount,
+        rawAmount,
+        decimals,
+        status: response.status,
+        router: payload?.router || null,
+        requestId: payload?.requestId || null,
+        errorCode: payload?.errorCode ?? null,
+        errorMessage: payload?.errorMessage || payload?.error || null,
+      };
+    }
+
+    const rawAmountNumber = Number(rawAmount);
+    const quotedTokenAmount = rawAmountNumber / 10 ** decimals;
+    const outSOL = outAmountLamports / 1_000_000_000;
+    const effectivePriceSOLPerToken = outSOL / quotedTokenAmount;
+
+    if (
+      !Number.isFinite(quotedTokenAmount) ||
+      quotedTokenAmount <= 0 ||
+      !Number.isFinite(outSOL) ||
+      outSOL <= 0 ||
+      !Number.isFinite(effectivePriceSOLPerToken) ||
+      effectivePriceSOLPerToken <= 0
+    ) {
+      return {
+        executable: false,
+        reason: "invalid_quote_math",
+        mint,
+        tokenAmount: amount,
+        rawAmount,
+        decimals,
+        status: response.status,
+      };
+    }
+
+    return {
+      executable: true,
+      reason: "quote_available",
+      mint,
+      tokenAmount: amount,
+      quotedTokenAmount,
+      rawAmount,
+      decimals,
+      status: response.status,
+      outAmountLamports,
+      outSOL,
+      effectivePriceSOLPerToken,
+      router: payload?.router || null,
+      requestId: payload?.requestId || null,
+    };
+  } catch (error) {
+    return {
+      executable: false,
+      reason: "invalid_json",
+      mint,
+      tokenAmount: amount,
+      rawAmount,
+      decimals,
+      status: response.status,
+      error: String(error),
+    };
+  }
 }
 
 function selectBestSolQuotedPair(pairs, mint, wrappedSolMint) {
@@ -740,95 +899,33 @@ export async function fetchPaperExitSolPrices(
   mints,
   {
     wrappedSolMint = DEFAULT_WRAPPED_SOL_MINT,
-    jupiterApiKey = null,
-    tokenAmountsByMint = null,
   } = {}
 ) {
   const uniqueMints = [...new Set((mints || []).filter(Boolean))];
-  const merged = new Map();
-
-  let jupiterPrices = new Map();
+  let markPrices = new Map();
 
   try {
-    jupiterPrices = await fetchJupiterSolPrices(
+    markPrices = await fetchGeckoTerminalMarkSolPrices(
       uniqueMints,
-      wrappedSolMint,
-      jupiterApiKey
+      wrappedSolMint
     );
   } catch (error) {
     console.warn({
-      message: "⚠️ JUPITER PRICE PROVIDER ERROR",
+      message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
       reason: "unexpected_exception",
       error: String(error),
     });
   }
 
-  for (const [mint, priceInfo] of jupiterPrices.entries()) {
-    merged.set(mint, priceInfo);
-  }
-
-  const missingAfterPrice = uniqueMints.filter((mint) => !merged.has(mint));
-
-  if (missingAfterPrice.length) {
-    let swapQuotePrices = new Map();
-
-    try {
-      swapQuotePrices = await fetchJupiterSwapQuoteSolPrices(
-        missingAfterPrice,
-        wrappedSolMint,
-        jupiterApiKey,
-        tokenAmountsByMint
-      );
-    } catch (error) {
-      console.warn({
-        message: "⚠️ JUPITER SWAP QUOTE ERROR",
-        reason: "unexpected_exception",
-        error: String(error),
-      });
-    }
-
-    for (const [mint, priceInfo] of swapQuotePrices.entries()) {
-      if (!merged.has(mint)) merged.set(mint, priceInfo);
-    }
-  }
-
-  const missingAfterSwap = uniqueMints.filter((mint) => !merged.has(mint));
-
-  if (missingAfterSwap.length) {
-    let dexPrices = new Map();
-
-    try {
-      dexPrices = await fetchDexScreenerSolPrices(
-        missingAfterSwap,
-        wrappedSolMint
-      );
-    } catch (error) {
-      console.warn({
-        message: "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
-        reason: "unexpected_exception",
-        error: String(error),
-      });
-    }
-
-    for (const [mint, priceInfo] of dexPrices.entries()) {
-      if (!merged.has(mint)) merged.set(mint, priceInfo);
-    }
-  }
-
   console.log({
-    message: "💹 PAPER PRICE PROVIDERS",
+    message: "💹 PAPER MARK PRICE PROVIDER",
     requested: uniqueMints.length,
-    jupiterPriced: [...merged.values()].filter(
-      (item) => item?.source === "JUPITER_PRICE_V3_USD_RATIO"
-    ).length,
-    jupiterSwapQuoted: [...merged.values()].filter(
-      (item) => item?.source === "JUPITER_SWAP_V2_QUOTE"
-    ).length,
-    dexScreenerPriced: [...merged.values()].filter(
-      (item) => item?.source === "DEXSCREENER_SOL_QUOTE"
-    ).length,
-    missing: uniqueMints.filter((mint) => !merged.has(mint)).length,
+    geckoTerminalPriced: markPrices.size,
+    missing: uniqueMints.filter((mint) => !markPrices.has(mint)).length,
+    source: "GECKOTERMINAL_PUBLIC_SIMPLE",
+    execution: "DISABLED",
+    realMoney: false,
   });
 
-  return merged;
+  return markPrices;
 }
