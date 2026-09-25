@@ -104,14 +104,22 @@ async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
       continue;
     }
 
-    console.warn({
-      message: `⚠️ ${logPrefix} ERROR`,
-      reason: "http_error",
-      status: response.status,
-    });
-    return null;
-  }
+    let responseBody = null;
 
+try {
+  responseBody = await response.text();
+} catch (bodyError) {
+  responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
+}
+
+console.warn({
+  message: `⚠️ ${logPrefix} ERROR`,
+  reason: "http_error",
+  status: response.status,
+  responseBody,
+});
+return null;
+  }
   return null;
 }
 
