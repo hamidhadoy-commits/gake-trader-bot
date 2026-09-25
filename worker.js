@@ -2218,11 +2218,8 @@ async function processPaperExitPosition(env, rawPosition, config, priceInfo) {
     exits++;
     console.log(result.exit);
   }
-
+    
   return { exits, skipped: result?.inserted ? 0 : 1 };
-  }
-
-    return { exits, skipped: result?.inserted ? 0 : 1 };
   }
 
   const takeProfitEnabled = Number(config?.take_profit_enabled || 0) === 1;
