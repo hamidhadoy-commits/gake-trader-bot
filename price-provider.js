@@ -6,13 +6,13 @@ const JUPITER_TOKENS_SEARCH_URL = "https://api.jup.ag/tokens/v2/search";
 const JUPITER_SWAP_ORDER_URL = "https://api.jup.ag/swap/v2/order";
 const DEXSCREENER_TOKEN_URL_PREFIX =
   "https://api.dexscreener.com/tokens/v1/solana/";
-const GECKOTERMINAL_SIMPLE_PRICE_URL_PREFIX =
-  "https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/";
+const COINGECKO_ONCHAIN_PRICE_URL_PREFIX =
+  "https://api.coingecko.com/api/v3/onchain/simple/networks/solana/token_price/";
 
 const JUPITER_MAX_TARGET_MINTS_PER_REQUEST = 49;
 const JUPITER_TOKENS_MAX_MINTS_PER_REQUEST = 100;
 const DEXSCREENER_MAX_TOKENS_PER_REQUEST = 30;
-const GECKOTERMINAL_MAX_TARGET_MINTS_PER_REQUEST = 29;
+const COINGECKO_MAX_TARGET_MINTS_PER_REQUEST = 29;
 const PRICE_FETCH_TIMEOUT_MS = 7000;
 const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
@@ -23,7 +23,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = PRICE_FETCH_TIMEOUT_MS) {
+async function fetchWithTimeout(
+  url,
+  options = {},
+  timeoutMs = PRICE_FETCH_TIMEOUT_MS
+) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -98,7 +102,8 @@ async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
       const delayMs = RETRY_DELAYS_MS[attempt];
       console.warn({
         message: `⚠️ ${logPrefix} RETRY`,
-        reason: response.status === 429 ? "rate_limited" : "upstream_5xx",
+        reason:
+          response.status === 429 ? "rate_limited" : "upstream_5xx",
         status: response.status,
         attempt: attempt + 1,
         delayMs,
@@ -127,7 +132,11 @@ async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
   return null;
 }
 
-async function fetchJupiterSolPrices(mints, wrappedSolMint, jupiterApiKey) {
+async function fetchJupiterSolPrices(
+  mints,
+  wrappedSolMint,
+  jupiterApiKey
+) {
   const uniqueMints = [...new Set((mints || []).filter(Boolean))];
   const prices = new Map();
 
@@ -177,9 +186,12 @@ async function fetchJupiterSolPrices(mints, wrappedSolMint, jupiterApiKey) {
         if (!item) continue;
 
         const tokenUsdPrice = Number(item?.usdPrice);
-        if (!Number.isFinite(tokenUsdPrice) || tokenUsdPrice <= 0) continue;
+        if (!Number.isFinite(tokenUsdPrice) || tokenUsdPrice <= 0) {
+          continue;
+        }
 
         const priceSOLPerToken = tokenUsdPrice / solUsdPrice;
+
         if (!Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) {
           continue;
         }
@@ -230,7 +242,9 @@ async function fetchJupiterTokenDecimals(mints, jupiterApiKey) {
     );
 
     const response = await fetchJupiterWithRetry(
-      `${JUPITER_TOKENS_SEARCH_URL}?query=${encodeURIComponent(chunk.join(","))}`,
+      `${JUPITER_TOKENS_SEARCH_URL}?query=${encodeURIComponent(
+        chunk.join(",")
+      )}`,
       jupiterApiKey,
       "JUPITER TOKENS PROVIDER"
     );
@@ -323,7 +337,10 @@ async function fetchJupiterSwapQuoteSolPrices(
 
   for (const mint of uniqueMints) {
     const decimals = decimalsByMint.get(mint);
-    const humanAmount = getTokenAmountForMint(tokenAmountsByMint, mint);
+    const humanAmount = getTokenAmountForMint(
+      tokenAmountsByMint,
+      mint
+    );
 
     if (!Number.isInteger(decimals)) {
       console.warn({
@@ -367,7 +384,10 @@ async function fetchJupiterSwapQuoteSolPrices(
       const payload = await response.json();
       const outAmountLamports = Number(payload?.outAmount);
 
-      if (!Number.isFinite(outAmountLamports) || outAmountLamports <= 0) {
+      if (
+        !Number.isFinite(outAmountLamports) ||
+        outAmountLamports <= 0
+      ) {
         console.warn({
           message: "⚠️ JUPITER SWAP QUOTE UNAVAILABLE",
           mint,
@@ -380,7 +400,8 @@ async function fetchJupiterSwapQuoteSolPrices(
       }
 
       const rawAmountNumber = Number(rawAmount);
-      const quotedTokenAmount = rawAmountNumber / 10 ** decimals;
+      const quotedTokenAmount =
+        rawAmountNumber / 10 ** decimals;
       const outSOL = outAmountLamports / 1_000_000_000;
 
       if (
@@ -392,9 +413,13 @@ async function fetchJupiterSwapQuoteSolPrices(
         continue;
       }
 
-      const priceSOLPerToken = outSOL / quotedTokenAmount;
+      const priceSOLPerToken =
+        outSOL / quotedTokenAmount;
 
-      if (!Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) {
+      if (
+        !Number.isFinite(priceSOLPerToken) ||
+        priceSOLPerToken <= 0
+      ) {
         continue;
       }
 
@@ -403,7 +428,9 @@ async function fetchJupiterSwapQuoteSolPrices(
         liquidityUSD: 0,
         pairAddress: null,
         dexId: payload?.router
-          ? `JUPITER_SWAP_V2_${String(payload.router).toUpperCase()}`
+          ? `JUPITER_SWAP_V2_${String(
+              payload.router
+            ).toUpperCase()}`
           : "JUPITER_SWAP_V2",
         url: null,
         source: "JUPITER_SWAP_V2_QUOTE",
@@ -439,27 +466,44 @@ async function fetchJupiterSwapQuoteSolPrices(
   return prices;
 }
 
-
-async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
+async function fetchCoinGeckoMarkSolPrices(
+  mints,
+  wrappedSolMint,
+  coingeckoApiKey
+) {
   const uniqueMints = [...new Set((mints || []).filter(Boolean))];
   const prices = new Map();
+
+  if (!coingeckoApiKey) {
+    console.warn({
+      message: "⚠️ COINGECKO MARK PRICE ERROR",
+      reason: "missing_api_key",
+      behavior: "positions_without_mark_price_will_be_skipped",
+    });
+    return prices;
+  }
 
   for (
     let offset = 0;
     offset < uniqueMints.length;
-    offset += GECKOTERMINAL_MAX_TARGET_MINTS_PER_REQUEST
+    offset += COINGECKO_MAX_TARGET_MINTS_PER_REQUEST
   ) {
     const chunk = uniqueMints.slice(
       offset,
-      offset + GECKOTERMINAL_MAX_TARGET_MINTS_PER_REQUEST
+      offset + COINGECKO_MAX_TARGET_MINTS_PER_REQUEST
     );
 
     if (!chunk.length) continue;
 
-    const addresses = [...new Set([...chunk, wrappedSolMint])];
+    const addresses = [
+      ...new Set([...chunk, wrappedSolMint]),
+    ];
+
     const url =
-      GECKOTERMINAL_SIMPLE_PRICE_URL_PREFIX +
-      addresses.map((address) => encodeURIComponent(address)).join(",");
+      COINGECKO_ONCHAIN_PRICE_URL_PREFIX +
+      addresses
+        .map((address) => encodeURIComponent(address))
+        .join(",");
 
     let response = null;
 
@@ -467,12 +511,13 @@ async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
       response = await fetchWithTimeout(url, {
         method: "GET",
         headers: {
-          accept: "application/json;version=20230203",
+          accept: "application/json",
+          "x-cg-demo-api-key": coingeckoApiKey,
         },
       });
     } catch (error) {
       console.warn({
-        message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+        message: "⚠️ COINGECKO MARK PRICE ERROR",
         reason: "network_or_timeout",
         error: String(error),
       });
@@ -481,9 +526,10 @@ async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
 
     if (response.status === 429) {
       console.warn({
-        message: "⚠️ GECKOTERMINAL MARK PRICE RATE LIMITED",
+        message: "⚠️ COINGECKO MARK PRICE RATE LIMITED",
         status: response.status,
-        behavior: "positions_without_mark_price_will_be_skipped",
+        behavior:
+          "positions_without_mark_price_will_be_skipped",
       });
       break;
     }
@@ -498,7 +544,7 @@ async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
       }
 
       console.warn({
-        message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+        message: "⚠️ COINGECKO MARK PRICE ERROR",
         reason: "http_error",
         status: response.status,
         responseBody,
@@ -508,12 +554,19 @@ async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
 
     try {
       const payload = await response.json();
-      const tokenPrices = payload?.data?.attributes?.token_prices || {};
-      const solUsdPrice = Number(tokenPrices?.[wrappedSolMint]);
+      const tokenPrices =
+        payload?.data?.attributes?.token_prices || {};
 
-      if (!Number.isFinite(solUsdPrice) || solUsdPrice <= 0) {
+      const solUsdPrice = Number(
+        tokenPrices?.[wrappedSolMint]
+      );
+
+      if (
+        !Number.isFinite(solUsdPrice) ||
+        solUsdPrice <= 0
+      ) {
         console.warn({
-          message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+          message: "⚠️ COINGECKO MARK PRICE ERROR",
           reason: "missing_wsol_price",
         });
         continue;
@@ -522,13 +575,20 @@ async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
       for (const mint of chunk) {
         const tokenUsdPrice = Number(tokenPrices?.[mint]);
 
-        if (!Number.isFinite(tokenUsdPrice) || tokenUsdPrice <= 0) {
+        if (
+          !Number.isFinite(tokenUsdPrice) ||
+          tokenUsdPrice <= 0
+        ) {
           continue;
         }
 
-        const priceSOLPerToken = tokenUsdPrice / solUsdPrice;
+        const priceSOLPerToken =
+          tokenUsdPrice / solUsdPrice;
 
-        if (!Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) {
+        if (
+          !Number.isFinite(priceSOLPerToken) ||
+          priceSOLPerToken <= 0
+        ) {
           continue;
         }
 
@@ -536,16 +596,16 @@ async function fetchGeckoTerminalMarkSolPrices(mints, wrappedSolMint) {
           priceSOLPerToken,
           liquidityUSD: 0,
           pairAddress: null,
-          dexId: "GECKOTERMINAL_SIMPLE",
+          dexId: "COINGECKO_ONCHAIN",
           url: null,
-          source: "GECKOTERMINAL_MARK_USD_RATIO",
+          source: "COINGECKO_MARK_USD_RATIO",
           tokenUsdPrice,
           solUsdPrice,
         });
       }
     } catch (error) {
       console.warn({
-        message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+        message: "⚠️ COINGECKO MARK PRICE ERROR",
         reason: "invalid_json",
         error: String(error),
       });
@@ -564,11 +624,18 @@ export async function fetchJupiterExecutableSellQuote({
   const amount = Number(tokenAmount);
 
   if (!mint) {
-    return { executable: false, reason: "missing_mint" };
+    return {
+      executable: false,
+      reason: "missing_mint",
+    };
   }
 
   if (!jupiterApiKey) {
-    return { executable: false, reason: "missing_api_key", mint };
+    return {
+      executable: false,
+      reason: "missing_api_key",
+      mint,
+    };
   }
 
   if (!Number.isFinite(amount) || amount <= 0) {
@@ -580,10 +647,12 @@ export async function fetchJupiterExecutableSellQuote({
     };
   }
 
-  const decimalsByMint = await fetchJupiterTokenDecimals(
-    [mint],
-    jupiterApiKey
-  );
+  const decimalsByMint =
+    await fetchJupiterTokenDecimals(
+      [mint],
+      jupiterApiKey
+    );
+
   const decimals = decimalsByMint.get(mint);
 
   if (!Number.isInteger(decimals)) {
@@ -595,7 +664,10 @@ export async function fetchJupiterExecutableSellQuote({
     };
   }
 
-  const rawAmount = humanAmountToRaw(amount, decimals);
+  const rawAmount = humanAmountToRaw(
+    amount,
+    decimals
+  );
 
   if (!rawAmount) {
     return {
@@ -617,12 +689,20 @@ export async function fetchJupiterExecutableSellQuote({
 
   let response = null;
 
-  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+  for (
+    let attempt = 0;
+    attempt <= RETRY_DELAYS_MS.length;
+    attempt++
+  ) {
     try {
-      response = await fetchJupiterWithPacing(url, jupiterApiKey);
+      response = await fetchJupiterWithPacing(
+        url,
+        jupiterApiKey
+      );
     } catch (error) {
       if (attempt < RETRY_DELAYS_MS.length) {
-        const delayMs = RETRY_DELAYS_MS[attempt];
+        const delayMs =
+          RETRY_DELAYS_MS[attempt];
         await sleep(delayMs);
         continue;
       }
@@ -645,25 +725,32 @@ export async function fetchJupiterExecutableSellQuote({
     try {
       responseBody = await response.text();
     } catch (bodyError) {
-      responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
+      responseBody =
+        `UNREADABLE_BODY: ${String(bodyError)}`;
     }
 
     if (
-      (response.status === 429 || response.status >= 500) &&
+      (response.status === 429 ||
+        response.status >= 500) &&
       attempt < RETRY_DELAYS_MS.length
     ) {
-      const delayMs = RETRY_DELAYS_MS[attempt];
+      const delayMs =
+        RETRY_DELAYS_MS[attempt];
       await sleep(delayMs);
       continue;
     }
 
     const noRoute =
       response.status === 400 &&
-      /failed to get quotes/i.test(String(responseBody || ""));
+      /failed to get quotes/i.test(
+        String(responseBody || "")
+      );
 
     return {
       executable: false,
-      reason: noRoute ? "no_route" : "http_error",
+      reason: noRoute
+        ? "no_route"
+        : "http_error",
       mint,
       tokenAmount: amount,
       rawAmount,
@@ -687,9 +774,13 @@ export async function fetchJupiterExecutableSellQuote({
 
   try {
     const payload = await response.json();
-    const outAmountLamports = Number(payload?.outAmount);
+    const outAmountLamports =
+      Number(payload?.outAmount);
 
-    if (!Number.isFinite(outAmountLamports) || outAmountLamports <= 0) {
+    if (
+      !Number.isFinite(outAmountLamports) ||
+      outAmountLamports <= 0
+    ) {
       return {
         executable: false,
         reason: "missing_or_invalid_out_amount",
@@ -701,21 +792,30 @@ export async function fetchJupiterExecutableSellQuote({
         router: payload?.router || null,
         requestId: payload?.requestId || null,
         errorCode: payload?.errorCode ?? null,
-        errorMessage: payload?.errorMessage || payload?.error || null,
+        errorMessage:
+          payload?.errorMessage ||
+          payload?.error ||
+          null,
       };
     }
 
     const rawAmountNumber = Number(rawAmount);
-    const quotedTokenAmount = rawAmountNumber / 10 ** decimals;
-    const outSOL = outAmountLamports / 1_000_000_000;
-    const effectivePriceSOLPerToken = outSOL / quotedTokenAmount;
+    const quotedTokenAmount =
+      rawAmountNumber / 10 ** decimals;
+    const outSOL =
+      outAmountLamports / 1_000_000_000;
+
+    const effectivePriceSOLPerToken =
+      outSOL / quotedTokenAmount;
 
     if (
       !Number.isFinite(quotedTokenAmount) ||
       quotedTokenAmount <= 0 ||
       !Number.isFinite(outSOL) ||
       outSOL <= 0 ||
-      !Number.isFinite(effectivePriceSOLPerToken) ||
+      !Number.isFinite(
+        effectivePriceSOLPerToken
+      ) ||
       effectivePriceSOLPerToken <= 0
     ) {
       return {
@@ -758,26 +858,49 @@ export async function fetchJupiterExecutableSellQuote({
   }
 }
 
-function selectBestSolQuotedPair(pairs, mint, wrappedSolMint) {
+function selectBestSolQuotedPair(
+  pairs,
+  mint,
+  wrappedSolMint
+) {
   let best = null;
 
   for (const pair of pairs) {
     if (pair?.chainId !== "solana") continue;
-    if (pair?.baseToken?.address !== mint) continue;
-    if (pair?.quoteToken?.address !== wrappedSolMint) continue;
-
-    const priceSOLPerToken = Number(pair?.priceNative);
-    const liquidityUSD = Number(pair?.liquidity?.usd || 0);
-
-    if (!Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) {
+    if (pair?.baseToken?.address !== mint) {
+      continue;
+    }
+    if (
+      pair?.quoteToken?.address !==
+      wrappedSolMint
+    ) {
       continue;
     }
 
-    if (!best || liquidityUSD > best.liquidityUSD) {
+    const priceSOLPerToken =
+      Number(pair?.priceNative);
+    const liquidityUSD =
+      Number(pair?.liquidity?.usd || 0);
+
+    if (
+      !Number.isFinite(priceSOLPerToken) ||
+      priceSOLPerToken <= 0
+    ) {
+      continue;
+    }
+
+    if (
+      !best ||
+      liquidityUSD > best.liquidityUSD
+    ) {
       best = {
         priceSOLPerToken,
-        liquidityUSD: Number.isFinite(liquidityUSD) ? liquidityUSD : 0,
-        pairAddress: pair?.pairAddress || null,
+        liquidityUSD:
+          Number.isFinite(liquidityUSD)
+            ? liquidityUSD
+            : 0,
+        pairAddress:
+          pair?.pairAddress || null,
         dexId: pair?.dexId || null,
         url: pair?.url || null,
         source: "DEXSCREENER_SOL_QUOTE",
@@ -788,8 +911,16 @@ function selectBestSolQuotedPair(pairs, mint, wrappedSolMint) {
   return best;
 }
 
-async function fetchDexScreenerSolPrices(mints, wrappedSolMint) {
-  const uniqueMints = [...new Set((mints || []).filter(Boolean))];
+async function fetchDexScreenerSolPrices(
+  mints,
+  wrappedSolMint
+) {
+  const uniqueMints = [
+    ...new Set(
+      (mints || []).filter(Boolean)
+    ),
+  ];
+
   const prices = new Map();
 
   for (
@@ -799,7 +930,8 @@ async function fetchDexScreenerSolPrices(mints, wrappedSolMint) {
   ) {
     const chunk = uniqueMints.slice(
       offset,
-      offset + DEXSCREENER_MAX_TOKENS_PER_REQUEST
+      offset +
+        DEXSCREENER_MAX_TOKENS_PER_REQUEST
     );
 
     if (!chunk.length) continue;
@@ -807,34 +939,53 @@ async function fetchDexScreenerSolPrices(mints, wrappedSolMint) {
     let response = null;
     let failed = false;
 
-    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    for (
+      let attempt = 0;
+      attempt <= RETRY_DELAYS_MS.length;
+      attempt++
+    ) {
       try {
         response = await fetchWithTimeout(
-          `${DEXSCREENER_TOKEN_URL_PREFIX}${chunk.join(",")}`,
+          `${DEXSCREENER_TOKEN_URL_PREFIX}${chunk.join(
+            ","
+          )}`,
           {
             method: "GET",
-            headers: { accept: "application/json" },
+            headers: {
+              accept: "application/json",
+            },
           }
         );
       } catch (error) {
-        if (attempt < RETRY_DELAYS_MS.length) {
-          const delayMs = RETRY_DELAYS_MS[attempt];
+        if (
+          attempt <
+          RETRY_DELAYS_MS.length
+        ) {
+          const delayMs =
+            RETRY_DELAYS_MS[attempt];
+
           console.warn({
-            message: "⚠️ DEXSCREENER RETRY",
-            reason: "network_or_timeout",
+            message:
+              "⚠️ DEXSCREENER RETRY",
+            reason:
+              "network_or_timeout",
             attempt: attempt + 1,
             delayMs,
             error: String(error),
           });
+
           await sleep(delayMs);
           continue;
         }
 
         console.warn({
-          message: "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
-          reason: "network_or_timeout",
+          message:
+            "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
+          reason:
+            "network_or_timeout",
           error: String(error),
         });
+
         failed = true;
         break;
       }
@@ -843,49 +994,78 @@ async function fetchDexScreenerSolPrices(mints, wrappedSolMint) {
 
       if (response.status === 429) {
         console.warn({
-          message: "⚠️ DEXSCREENER RATE LIMITED",
+          message:
+            "⚠️ DEXSCREENER RATE LIMITED",
           status: response.status,
-          behavior: "position_without_price_will_be_skipped",
+          behavior:
+            "position_without_price_will_be_skipped",
         });
+
         failed = true;
         break;
       }
 
-      if (response.status >= 500 && attempt < RETRY_DELAYS_MS.length) {
-        const delayMs = RETRY_DELAYS_MS[attempt];
+      if (
+        response.status >= 500 &&
+        attempt <
+          RETRY_DELAYS_MS.length
+      ) {
+        const delayMs =
+          RETRY_DELAYS_MS[attempt];
+
         console.warn({
-          message: "⚠️ DEXSCREENER RETRY",
+          message:
+            "⚠️ DEXSCREENER RETRY",
           reason: "upstream_5xx",
           status: response.status,
           attempt: attempt + 1,
           delayMs,
         });
+
         await sleep(delayMs);
         continue;
       }
 
       console.warn({
-        message: "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
+        message:
+          "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
         reason: "http_error",
         status: response.status,
       });
+
       failed = true;
       break;
     }
 
-    if (failed || !response?.ok) continue;
+    if (failed || !response?.ok) {
+      continue;
+    }
 
     try {
-      const payload = await response.json();
-      const pairs = Array.isArray(payload) ? payload : [];
+      const payload =
+        await response.json();
+
+      const pairs =
+        Array.isArray(payload)
+          ? payload
+          : [];
 
       for (const mint of chunk) {
-        const best = selectBestSolQuotedPair(pairs, mint, wrappedSolMint);
-        if (best) prices.set(mint, best);
+        const best =
+          selectBestSolQuotedPair(
+            pairs,
+            mint,
+            wrappedSolMint
+          );
+
+        if (best) {
+          prices.set(mint, best);
+        }
       }
     } catch (error) {
       console.warn({
-        message: "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
+        message:
+          "⚠️ DEXSCREENER PRICE PROVIDER ERROR",
         reason: "invalid_json",
         error: String(error),
       });
@@ -898,34 +1078,50 @@ async function fetchDexScreenerSolPrices(mints, wrappedSolMint) {
 export async function fetchPaperExitSolPrices(
   mints,
   {
-    wrappedSolMint = DEFAULT_WRAPPED_SOL_MINT,
+    wrappedSolMint =
+      DEFAULT_WRAPPED_SOL_MINT,
+    coingeckoApiKey = null,
   } = {}
 ) {
-  const uniqueMints = [...new Set((mints || []).filter(Boolean))];
+  const uniqueMints = [
+    ...new Set(
+      (mints || []).filter(Boolean)
+    ),
+  ];
+
   let markPrices = new Map();
 
   try {
-    markPrices = await fetchGeckoTerminalMarkSolPrices(
-      uniqueMints,
-      wrappedSolMint
-    );
+    markPrices =
+      await fetchCoinGeckoMarkSolPrices(
+        uniqueMints,
+        wrappedSolMint,
+        coingeckoApiKey
+      );
   } catch (error) {
     console.warn({
-      message: "⚠️ GECKOTERMINAL MARK PRICE ERROR",
+      message:
+        "⚠️ COINGECKO MARK PRICE ERROR",
       reason: "unexpected_exception",
       error: String(error),
     });
   }
 
   console.log({
-    message: "💹 PAPER MARK PRICE PROVIDER",
+    message:
+      "💹 PAPER MARK PRICE PROVIDER",
     requested: uniqueMints.length,
-    geckoTerminalPriced: markPrices.size,
-    missing: uniqueMints.filter((mint) => !markPrices.has(mint)).length,
-    source: "GECKOTERMINAL_PUBLIC_SIMPLE",
+    coinGeckoPriced:
+      markPrices.size,
+    missing: uniqueMints.filter(
+      (mint) =>
+        !markPrices.has(mint)
+    ).length,
+    source:
+      "COINGECKO_DEMO_ONCHAIN",
     execution: "DISABLED",
     realMoney: false,
   });
 
   return markPrices;
-}
+            }
