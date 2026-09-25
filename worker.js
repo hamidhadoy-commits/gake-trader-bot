@@ -2234,11 +2234,28 @@ async function runPaperExitTick(env, trigger = {}) {
   let priceMap;
 
   try {
-  priceMap = await fetchPaperExitSolPrices(
+  const tokenAmountsByMint = new Map();
+
+for (const position of positions) {
+  const mint = position?.mint;
+  const amount = Number(position?.remaining_token_amount || 0);
+
+  if (!mint || !Number.isFinite(amount) || amount <= 0) {
+    continue;
+  }
+
+  tokenAmountsByMint.set(
+    mint,
+    (tokenAmountsByMint.get(mint) || 0) + amount
+  );
+}
+
+priceMap = await fetchPaperExitSolPrices(
   positions.map((position) => position.mint),
   {
     wrappedSolMint: WRAPPED_SOL_MINT,
     jupiterApiKey: env?.JUPITER_API_KEY || null,
+    tokenAmountsByMint,
   }
 );
 } catch (error) {
@@ -2528,14 +2545,14 @@ export default {
         ok: true,
         service: "gake-trader-bot",
         status: "RUNNING",
-        version: "GAKE-D1-PAPER-PRICE-JUPITER-V1",
+        version: "GAKE-D1-PAPER-PRICE-SWAP-FALLBACK-V1",
         strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_EXIT_D1",
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
-        paperPriceSource: "JUPITER_THEN_DEXSCREENER",
+        paperPriceSource: "JUPITER_PRICE_THEN_SWAP_V2_THEN_DEXSCREENER",
         jupiterApiKey:
   env?.JUPITER_API_KEY ? "CONFIGURED" : "MISSING",
         paperExitScheduleExpected: "* * * * *",
