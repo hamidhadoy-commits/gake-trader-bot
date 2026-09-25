@@ -2386,6 +2386,7 @@ priceMap = await fetchPaperExitSolPrices(
   {
     wrappedSolMint: WRAPPED_SOL_MINT,
     jupiterApiKey: env?.JUPITER_API_KEY || null,
+    coingeckoApiKey: env?.COINGECKO_API_KEY || null,
     tokenAmountsByMint,
   }
 );
@@ -2676,16 +2677,18 @@ export default {
         ok: true,
         service: "gake-trader-bot",
         status: "RUNNING",
-        version: "GAKE-D1-PAPER-MARK-EXECUTABILITY-V1",
+        version: "GAKE-D1-PAPER-MARK-COINGECKO-V1",
         strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_EXIT_D1",
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
-        paperPriceSource: "GECKOTERMINAL_MARK_THEN_JUPITER_EXECUTABILITY",
+        paperPriceSource: "COINGECKO_MARK_THEN_JUPITER_EXECUTABILITY",
         jupiterApiKey:
   env?.JUPITER_API_KEY ? "CONFIGURED" : "MISSING",
+        coingeckoApiKey:
+  env?.COINGECKO_API_KEY ? "CONFIGURED" : "MISSING",
         paperExitScheduleExpected: "* * * * *",
         solUsdPricing: "COINGECKO_WITH_ACCOUNT_FALLBACK",
         execution: "DISABLED",
