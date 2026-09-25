@@ -2235,9 +2235,12 @@ async function runPaperExitTick(env, trigger = {}) {
 
   try {
   priceMap = await fetchPaperExitSolPrices(
-    positions.map((position) => position.mint),
-    { wrappedSolMint: WRAPPED_SOL_MINT }
-  );
+  positions.map((position) => position.mint),
+  {
+    wrappedSolMint: WRAPPED_SOL_MINT,
+    jupiterApiKey: env?.JUPITER_API_KEY || null,
+  }
+);
 } catch (error) {
   console.error({
     message: "❌ PAPER PRICE FETCH ERROR",
@@ -2525,14 +2528,16 @@ export default {
         ok: true,
         service: "gake-trader-bot",
         status: "RUNNING",
-        version: "GAKE-D1-PAPER-PRICE-FALLBACK-V1",
+        version: "GAKE-D1-PAPER-PRICE-JUPITER-V1",
         strategy: "OKX_EXACT_THEN_ROUTED_WSOL_PAPER_EXIT_D1",
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
-        paperPriceSource: "DEXSCREENER_THEN_GECKOTERMINAL",
+        paperPriceSource: "JUPITER_THEN_DEXSCREENER",
+        jupiterApiKey:
+  env?.JUPITER_API_KEY ? "CONFIGURED" : "MISSING",
         paperExitScheduleExpected: "* * * * *",
         solUsdPricing: "COINGECKO_WITH_ACCOUNT_FALLBACK",
         execution: "DISABLED",
