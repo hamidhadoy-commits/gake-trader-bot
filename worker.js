@@ -3050,7 +3050,336 @@ async function handleWebhook(request, env) {
     realMoney: false,
   });
 }
+async function getPendingPaperSourceRouteChecks(env, limit = 4) {
+  const safeLimit = Math.max(
+    1,
+    Math.min(10, Math.floor(Number(limit) || 1))
+  );
 
+  const result = await runDatabaseOperation(
+    "get_pending_paper_source_route_checks",
+    () =>
+      env.DB.prepare(
+        `SELECT
+           p.signature AS source_signature,
+           p.mint,
+           p.token_amount AS source_token_amount,
+           p.input_sol AS source_input_sol,
+           p.entry_time
+         FROM paper_positions p
+         LEFT JOIN paper_source_route_checks c
+           ON c.source_signature = p.signature
+         WHERE c.source_signature IS NULL
+           AND p.status = 'PAPER_OPEN'
+           AND p.token_amount > 0
+           AND p.input_sol > 0
+         ORDER BY p.entry_time DESC
+         LIMIT ?`
+      )
+        .bind(safeLimit)
+        .all()
+  );
+
+  return Array.isArray(result?.results)
+    ? result.results
+    : [];
+}
+try {
+  await runPaperSourceRouteObservationBatch(env, 4);
+} catch (error) {
+  console.error({
+    message: "❌ SOURCE ROUTE OBSERVATION ERROR",
+    error: String(error),
+    behavior:
+      "observation_failed_exit_engine_already_completed",
+    execution: "DISABLED",
+    realMoney: false,
+  });
+}
+async function runPaperSourceRouteObservationBatch(
+  env,
+  limit = 4
+) {
+  const positions =
+    await getPendingPaperSourceRouteChecks(env, limit);
+
+  if (positions.length === 0) {
+    return {
+      checked: 0,
+      executable: 0,
+      noRoute: 0,
+      deferred: 0,
+    };
+  }
+
+  const [config, account] = await Promise.all([
+    getPaperCopyConfig(env),
+    getPaperCopyAccount(env),
+  ]);
+
+  const { price: solUsdPrice } =
+    await getSolUsdPrice(account);
+
+  /*
+   * Reuse the exact Paper Copy sizing logic,
+   * but model the account as if no positions were
+   * currently occupying open-position/exposure slots.
+   *
+   * This does NOT alter the real Paper Copy account.
+   */
+  const sizing = buildPaperCopySizing({
+    account,
+    config,
+    openStats: {
+      openCount: 0,
+      openExposureLamports: 0,
+    },
+    solUsdPrice,
+  });
+
+  if (!sizing.ok) {
+    console.warn({
+      message: "⚠️ SOURCE ROUTE BATCH DEFERRED",
+      reason: sizing.reason,
+      execution: "DISABLED",
+      realMoney: false,
+    });
+
+    return {
+      checked: 0,
+      executable: 0,
+      noRoute: 0,
+      deferred: positions.length,
+    };
+  }
+
+  const targetCopySOL =
+    lamportsToSOL(sizing.finalNotionalLamports);
+
+  const buySlippageBps = Math.max(
+    0,
+    Math.floor(Number(config.buy_slippage_bps || 0))
+  );
+
+  let checked = 0;
+  let executable = 0;
+  let noRoute = 0;
+  let deferred = 0;
+
+  for (const position of positions) {
+    const sourceSignature =
+      position.source_signature;
+
+    const mint =
+      position.mint;
+
+    const sourceTokenAmount =
+      Number(position.source_token_amount || 0);
+
+    const sourceInputSOL =
+      Number(position.source_input_sol || 0);
+
+    const sourceEntryPriceSOLPerToken =
+      sourceInputSOL > 0 && sourceTokenAmount > 0
+        ? sourceInputSOL / sourceTokenAmount
+        : 0;
+
+    const simulatedEntryPriceSOLPerToken =
+      sourceEntryPriceSOLPerToken *
+      (1 + buySlippageBps / BPS_DENOMINATOR);
+
+    const probeTokenAmount =
+      simulatedEntryPriceSOLPerToken > 0
+        ? targetCopySOL /
+          simulatedEntryPriceSOLPerToken
+        : 0;
+
+    if (
+      !sourceSignature ||
+      !mint ||
+      !Number.isFinite(probeTokenAmount) ||
+      probeTokenAmount <= 0
+    ) {
+      deferred += 1;
+      continue;
+    }
+
+    const quote =
+      await fetchJupiterExecutableSellQuote({
+        mint,
+        tokenAmount: probeTokenAmount,
+        wrappedSolMint: WRAPPED_SOL_MINT,
+        jupiterApiKey:
+          env?.JUPITER_API_KEY || null,
+      });
+
+    const reason =
+      quote?.reason || "quote_unavailable";
+
+    const definitive =
+      quote?.executable === true ||
+      reason === "no_route";
+
+    /*
+     * Temporary API/network failures are not persisted.
+     * They can be retried by a later Cron tick.
+     */
+    if (!definitive) {
+      deferred += 1;
+
+      console.warn({
+        message: "⚠️ SOURCE ROUTE CHECK DEFERRED",
+        sourceSignature,
+        mint,
+        reason,
+        status: quote?.status ?? null,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+
+      continue;
+    }
+
+    const entryTimeMs =
+      Date.parse(position.entry_time || "");
+
+    const ageMs =
+      Number.isFinite(entryTimeMs)
+        ? Date.now() - entryTimeMs
+        : Number.POSITIVE_INFINITY;
+
+    const probeBasis =
+      ageMs >= 0 &&
+      ageMs <= 5 * 60 * 1000
+        ? "NEAR_ENTRY_COPY_TARGET_WITH_BUY_SLIPPAGE"
+        : "HISTORICAL_BACKLOG_COPY_TARGET_WITH_BUY_SLIPPAGE";
+
+    const result =
+      await runDatabaseOperation(
+        "insert_paper_source_route_check",
+        () =>
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO paper_source_route_checks (
+               source_signature,
+               mint,
+               source_token_amount,
+               probe_token_amount,
+               probe_basis,
+               raw_amount,
+               decimals,
+               executable,
+               reason,
+               http_status,
+               response_body,
+               out_sol,
+               effective_price_sol_per_token,
+               router,
+               checked_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+            .bind(
+              sourceSignature,
+              mint,
+              sourceTokenAmount,
+              probeTokenAmount,
+              probeBasis,
+
+              quote?.rawAmount != null
+                ? String(quote.rawAmount)
+                : null,
+
+              Number.isInteger(quote?.decimals)
+                ? quote.decimals
+                : null,
+
+              quote?.executable === true
+                ? 1
+                : 0,
+
+              reason,
+
+              quote?.status ?? null,
+
+              quote?.responseBody ?? null,
+
+              Number.isFinite(Number(quote?.outSOL))
+                ? Number(quote.outSOL)
+                : null,
+
+              Number.isFinite(
+                Number(
+                  quote?.effectivePriceSOLPerToken
+                )
+              )
+                ? Number(
+                    quote.effectivePriceSOLPerToken
+                  )
+                : null,
+
+              quote?.router || null,
+
+              new Date().toISOString()
+            )
+            .run()
+      );
+
+    if (
+      Number(result?.meta?.changes ?? 0) === 1
+    ) {
+      checked += 1;
+
+      if (quote?.executable === true) {
+        executable += 1;
+      } else {
+        noRoute += 1;
+      }
+    }
+
+    console.log({
+      message:
+        quote?.executable === true
+          ? "✅ SOURCE ROUTE EXECUTABLE"
+          : "⛔ SOURCE ROUTE NO ROUTE",
+
+      sourceSignature,
+      mint,
+      sourceTokenAmount,
+      sourceInputSOL,
+      probeTokenAmount,
+      probeBasis,
+      targetCopySOL,
+      buySlippageBps,
+
+      executable:
+        quote?.executable === true,
+
+      reason,
+
+      status:
+        quote?.status ?? null,
+
+      router:
+        quote?.router || null,
+
+      behavior:
+        "OBSERVATION_ONLY_NO_BUY_FILTER",
+
+      execution: "DISABLED",
+      realMoney: false,
+    });
+  }
+
+  return {
+    checked,
+    executable,
+    noRoute,
+    deferred,
+    requested: positions.length,
+    targetCopySOL,
+    buySlippageBps,
+  };
+}
 export default {
   async scheduled(controller, env, ctx) {
     if (!env?.DB) {
