@@ -3388,9 +3388,20 @@ export default {
       scheduledTime: controller?.scheduledTime || null,
     });
 
-    try {
+        try {
       await runOnePaperEntryRouteObservation(env);
-    } catch (error)     try {
+    } catch (error) {
+      console.error({
+        message: "❌ ENTRY ROUTE OBSERVATION ERROR",
+        error: String(error),
+        behavior:
+          "observation_failed_exit_engine_already_completed",
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    }
+
+    try {
       await runPaperSourceRouteObservationBatch(env, 4);
     } catch (error) {
       console.error({
@@ -3401,17 +3412,7 @@ export default {
         execution: "DISABLED",
         realMoney: false,
       });
-    } {
-      console.error({
-        message: "❌ ENTRY ROUTE OBSERVATION ERROR",
-        error: String(error),
-        behavior:
-          "observation_failed_exit_engine_already_completed",
-        execution: "DISABLED",
-        realMoney: false,
-      });
     }
-  },  
   async fetch(request, env) {
     const url = new URL(request.url);
 
