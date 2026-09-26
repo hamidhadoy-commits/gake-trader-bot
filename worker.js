@@ -2501,7 +2501,251 @@ if (
 
   return { exits, skipped: 0 };
 }
+async function getPendingPaperEntryRouteCheck(env) {
+  return runDatabaseOperation(
+    "get_pending_paper_entry_route_check",
+    () =>
+      env.DB.prepare(
+        `SELECT
+           p.source_signature,
+           p.mint,
+           p.simulated_token_amount,
+           p.remaining_token_amount,
+           p.opened_at
+         FROM paper_copy_positions p
+         LEFT JOIN paper_entry_route_checks c
+           ON c.source_signature = p.source_signature
+         WHERE c.source_signature IS NULL
+           AND p.status = 'PAPER_OPEN'
+           AND p.simulated_token_amount > 0
+         ORDER BY p.opened_at ASC
+         LIMIT 1`
+      ).first()
+  );
+}
 
+async function runOnePaperEntryRouteObservation(env) {
+  const position =
+    await getPendingPaperEntryRouteCheck(env);
+
+  if (!position) {
+    return {
+      checked: 0,
+      deferred: 0,
+      reason: "no_pending_position",
+    };
+  }
+
+  const sourceSignature =
+    position.source_signature;
+
+  const mint =
+    position.mint;
+
+  const tokenAmount =
+    Number(position.simulated_token_amount || 0);
+
+  if (
+    !sourceSignature ||
+    !mint ||
+    !Number.isFinite(tokenAmount) ||
+    tokenAmount <= 0
+  ) {
+    console.warn({
+      message: "⚠️ ENTRY ROUTE CHECK DEFERRED",
+      sourceSignature,
+      mint,
+      tokenAmount,
+      reason: "invalid_position_data",
+      execution: "DISABLED",
+      realMoney: false,
+    });
+
+    return {
+      checked: 0,
+      deferred: 1,
+      reason: "invalid_position_data",
+    };
+  }
+
+  const quote =
+    await fetchJupiterExecutableSellQuote({
+      mint,
+      tokenAmount,
+      wrappedSolMint: WRAPPED_SOL_MINT,
+      jupiterApiKey:
+        env?.JUPITER_API_KEY || null,
+    });
+
+  const reason =
+    quote?.reason || "quote_unavailable";
+
+  const definitive =
+    quote?.executable === true ||
+    reason === "no_route";
+
+  /*
+   * Temporary provider/network failures are NOT stored.
+   * They will be retried on a later Cron tick.
+   */
+  if (!definitive) {
+    console.warn({
+      message: "⚠️ ENTRY ROUTE CHECK DEFERRED",
+      sourceSignature,
+      mint,
+      tokenAmount,
+      reason,
+      status: quote?.status ?? null,
+      execution: "DISABLED",
+      realMoney: false,
+    });
+
+    return {
+      checked: 0,
+      deferred: 1,
+      reason,
+    };
+  }
+
+  const checkedAt =
+    new Date().toISOString();
+
+  const result =
+    await runDatabaseOperation(
+      "insert_paper_entry_route_check",
+      () =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO paper_entry_route_checks (
+             source_signature,
+             mint,
+             token_amount,
+             raw_amount,
+             decimals,
+             executable,
+             reason,
+             http_status,
+             response_body,
+             out_sol,
+             effective_price_sol_per_token,
+             router,
+             checked_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            sourceSignature,
+            mint,
+            tokenAmount,
+
+            quote?.rawAmount != null
+              ? String(quote.rawAmount)
+              : null,
+
+            Number.isInteger(quote?.decimals)
+              ? quote.decimals
+              : null,
+
+            quote?.executable === true
+              ? 1
+              : 0,
+
+            reason,
+
+            quote?.status ?? null,
+
+            quote?.responseBody ?? null,
+
+            Number.isFinite(Number(quote?.outSOL))
+              ? Number(quote.outSOL)
+              : null,
+
+            Number.isFinite(
+              Number(
+                quote?.effectivePriceSOLPerToken
+              )
+            )
+              ? Number(
+                  quote.effectivePriceSOLPerToken
+                )
+              : null,
+
+            quote?.router || null,
+
+            checkedAt
+          )
+          .run()
+    );
+
+  const inserted =
+    Number(result?.meta?.changes ?? 0) === 1;
+
+  console.log({
+    message:
+      quote?.executable === true
+        ? "✅ ENTRY ROUTE EXECUTABLE"
+        : "⛔ ENTRY ROUTE NO ROUTE",
+
+    sourceSignature,
+    mint,
+    tokenAmount,
+
+    rawAmount:
+      quote?.rawAmount != null
+        ? String(quote.rawAmount)
+        : null,
+
+    decimals:
+      Number.isInteger(quote?.decimals)
+        ? quote.decimals
+        : null,
+
+    executable:
+      quote?.executable === true,
+
+    reason,
+
+    status:
+      quote?.status ?? null,
+
+    outSOL:
+      Number.isFinite(Number(quote?.outSOL))
+        ? Number(quote.outSOL)
+        : null,
+
+    effectivePriceSOLPerToken:
+      Number.isFinite(
+        Number(
+          quote?.effectivePriceSOLPerToken
+        )
+      )
+        ? Number(
+            quote.effectivePriceSOLPerToken
+          )
+        : null,
+
+    router:
+      quote?.router || null,
+
+    inserted,
+
+    observationScope:
+      "FULL_SIMULATED_POSITION",
+
+    behavior:
+      "OBSERVATION_ONLY_NO_BUY_FILTER",
+
+    execution: "DISABLED",
+    realMoney: false,
+  });
+
+  return {
+    checked: inserted ? 1 : 0,
+    deferred: 0,
+    executable:
+      quote?.executable === true,
+    reason,
+  };
+        }
 async function runPaperExitTick(env, trigger = {}) {
   const startedAt = new Date().toISOString();
   const [config, positions] = await Promise.all([
@@ -2820,14 +3064,25 @@ export default {
         new Error("env.DB is missing")
       );
     }
-
     await runPaperExitTick(env, {
       type: "CRON",
       cron: controller?.cron || null,
       scheduledTime: controller?.scheduledTime || null,
     });
-  },
 
+    try {
+      await runOnePaperEntryRouteObservation(env);
+    } catch (error) {
+      console.error({
+        message: "❌ ENTRY ROUTE OBSERVATION ERROR",
+        error: String(error),
+        behavior:
+          "observation_failed_exit_engine_already_completed",
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    }
+  },  
   async fetch(request, env) {
     const url = new URL(request.url);
 
