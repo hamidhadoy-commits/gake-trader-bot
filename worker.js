@@ -3412,8 +3412,8 @@ export default {
         execution: "DISABLED",
         realMoney: false,
       });
-  },
     }
+    },
     
   async fetch(request, env) {
     const url = new URL(request.url);
