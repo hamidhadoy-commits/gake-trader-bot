@@ -3084,18 +3084,7 @@ async function getPendingPaperSourceRouteChecks(env, limit = 4) {
     ? result.results
     : [];
 }
-try {
-  await runPaperSourceRouteObservationBatch(env, 4);
-} catch (error) {
-  console.error({
-    message: "❌ SOURCE ROUTE OBSERVATION ERROR",
-    error: String(error),
-    behavior:
-      "observation_failed_exit_engine_already_completed",
-    execution: "DISABLED",
-    realMoney: false,
-  });
-}
+
 async function runPaperSourceRouteObservationBatch(
   env,
   limit = 4
@@ -3401,7 +3390,18 @@ export default {
 
     try {
       await runOnePaperEntryRouteObservation(env);
+    } catch (error)     try {
+      await runPaperSourceRouteObservationBatch(env, 4);
     } catch (error) {
+      console.error({
+        message: "❌ SOURCE ROUTE OBSERVATION ERROR",
+        error: String(error),
+        behavior:
+          "observation_failed_exit_engine_already_completed",
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    } {
       console.error({
         message: "❌ ENTRY ROUTE OBSERVATION ERROR",
         error: String(error),
