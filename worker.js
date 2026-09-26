@@ -867,7 +867,26 @@ async function getPaperCopyAccount(env) {
 async function getOpenPaperCopyStats(env) {
   const row = await runDatabaseOperation("get_open_paper_copy_stats", () =>
     env.DB.prepare(
-      "SELECT COUNT(*) AS open_count, COALESCE(SUM(copy_notional_lamports), 0) AS open_exposure_lamports FROM paper_copy_positions WHERE status = 'PAPER_OPEN'"
+      `SELECT
+   COUNT(*) AS open_count,
+   COALESCE(
+     SUM(
+       CASE
+         WHEN simulated_token_amount > 0
+           AND remaining_token_amount > 0
+         THEN CAST(
+           copy_notional_lamports *
+           remaining_token_amount /
+           simulated_token_amount
+           AS INTEGER
+         )
+         ELSE 0
+       END
+     ),
+     0
+   ) AS open_exposure_lamports
+ FROM paper_copy_positions
+ WHERE status = 'PAPER_OPEN'`
     ).first()
   );
 
@@ -1185,7 +1204,19 @@ async function createPaperCopyBuy(buySignal, env) {
           AND (
             (
               SELECT COALESCE(
-                SUM(copy_notional_lamports),
+                SUM(
+  CASE
+    WHEN simulated_token_amount > 0
+      AND remaining_token_amount > 0
+    THEN CAST(
+      copy_notional_lamports *
+      remaining_token_amount /
+      simulated_token_amount
+      AS INTEGER
+    )
+    ELSE 0
+  END
+),
                 0
               )
               FROM paper_copy_positions
