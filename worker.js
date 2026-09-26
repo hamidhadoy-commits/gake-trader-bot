@@ -3083,6 +3083,25 @@ try {
     realMoney: false,
   });
 }
+    await runPaperExitTick(env, {
+      type: "CRON",
+      cron: controller?.cron || null,
+      scheduledTime: controller?.scheduledTime || null,
+    });
+
+    try {
+      await runOnePaperEntryRouteObservation(env);
+    } catch (error) {
+      console.error({
+        message: "❌ ENTRY ROUTE OBSERVATION ERROR",
+        error: String(error),
+        behavior:
+          "observation_failed_exit_engine_already_completed",
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    }
+  },
   async fetch(request, env) {
     const url = new URL(request.url);
 
