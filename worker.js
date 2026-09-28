@@ -3369,6 +3369,277 @@ async function runPaperSourceRouteObservationBatch(
     buySlippageBps,
   };
 }
+async function getDuePaperSourceRouteSnapshots(env, limit = 4) {
+  const safeLimit = Math.max(
+    1,
+    Math.min(10, Math.floor(Number(limit) || 1))
+  );
+
+  const result = await runDatabaseOperation(
+    "get_due_paper_source_route_snapshots",
+    () =>
+      env.DB.prepare(
+        `SELECT
+           c.source_signature,
+           c.mint,
+           c.probe_token_amount,
+           c.checked_at AS initial_route_checked_at,
+           CASE WHEN m1.source_signature IS NULL THEN 0 ELSE 1 END AS has_m1,
+           CASE WHEN m3.source_signature IS NULL THEN 0 ELSE 1 END AS has_m3,
+           CASE WHEN m5.source_signature IS NULL THEN 0 ELSE 1 END AS has_m5,
+           CASE WHEN m10.source_signature IS NULL THEN 0 ELSE 1 END AS has_m10
+         FROM paper_source_route_checks c
+         LEFT JOIN paper_source_route_snapshots m1
+           ON m1.source_signature = c.source_signature
+          AND m1.age_bucket = 'M1'
+         LEFT JOIN paper_source_route_snapshots m3
+           ON m3.source_signature = c.source_signature
+          AND m3.age_bucket = 'M3'
+         LEFT JOIN paper_source_route_snapshots m5
+           ON m5.source_signature = c.source_signature
+          AND m5.age_bucket = 'M5'
+         LEFT JOIN paper_source_route_snapshots m10
+           ON m10.source_signature = c.source_signature
+          AND m10.age_bucket = 'M10'
+         WHERE c.probe_basis LIKE 'NEAR_ENTRY%'
+         ORDER BY c.checked_at DESC
+         LIMIT 100`
+      ).all()
+  );
+
+  const rows = Array.isArray(result?.results)
+    ? result.results
+    : [];
+
+  const nowMs = Date.now();
+  const due = [];
+
+  for (const row of rows) {
+    const initialMs = Date.parse(
+      row.initial_route_checked_at || ""
+    );
+
+    if (!Number.isFinite(initialMs)) {
+      continue;
+    }
+
+    const ageSeconds =
+      (nowMs - initialMs) / 1000;
+
+    let ageBucket = null;
+    let alreadyStored = false;
+
+    if (ageSeconds >= 60 && ageSeconds < 180) {
+      ageBucket = "M1";
+      alreadyStored = Number(row.has_m1 || 0) === 1;
+    } else if (
+      ageSeconds >= 180 &&
+      ageSeconds < 300
+    ) {
+      ageBucket = "M3";
+      alreadyStored = Number(row.has_m3 || 0) === 1;
+    } else if (
+      ageSeconds >= 300 &&
+      ageSeconds < 600
+    ) {
+      ageBucket = "M5";
+      alreadyStored = Number(row.has_m5 || 0) === 1;
+    } else if (
+      ageSeconds >= 600 &&
+      ageSeconds < 900
+    ) {
+      ageBucket = "M10";
+      alreadyStored = Number(row.has_m10 || 0) === 1;
+    }
+
+    if (!ageBucket || alreadyStored) {
+      continue;
+    }
+
+    due.push({
+      sourceSignature: row.source_signature,
+      mint: row.mint,
+      probeTokenAmount:
+        Number(row.probe_token_amount || 0),
+      initialRouteCheckedAt:
+        row.initial_route_checked_at,
+      ageBucket,
+      ageSeconds,
+    });
+  }
+
+  due.sort(
+    (a, b) => b.ageSeconds - a.ageSeconds
+  );
+
+  return due.slice(0, safeLimit);
+}
+
+async function runPaperSourceRoutePersistenceBatch(
+  env,
+  limit = 4) 
+{
+  const due =
+    await getDuePaperSourceRouteSnapshots(
+      env,
+      limit
+    );
+
+  if (due.length === 0) {
+    return {
+      checked: 0,
+      executable: 0,
+      noRoute: 0,
+      deferred: 0,
+    };
+  }
+
+  let checked = 0;
+  let executable = 0;
+  let noRoute = 0;
+  let deferred = 0;
+
+  for (const item of due) {
+    if (
+      !item.sourceSignature ||
+      !item.mint ||
+      !Number.isFinite(item.probeTokenAmount) ||
+      item.probeTokenAmount <= 0
+    ) {
+      deferred += 1;
+      continue;
+    }
+
+    const quote =
+      await fetchJupiterExecutableSellQuote({
+        mint: item.mint,
+        tokenAmount: item.probeTokenAmount,
+        wrappedSolMint: WRAPPED_SOL_MINT,
+        jupiterApiKey:
+          env?.JUPITER_API_KEY || null,
+      });
+
+    const reason =
+      quote?.reason || "quote_unavailable";
+
+    const definitive =
+      quote?.executable === true ||
+      reason === "no_route";
+
+    if (!definitive) {
+      deferred += 1;
+
+      console.warn({
+        message:
+          "⚠️ ROUTE PERSISTENCE CHECK DEFERRED",
+        sourceSignature: item.sourceSignature,
+        mint: item.mint,
+        ageBucket: item.ageBucket,
+        ageSeconds: item.ageSeconds,
+        reason,
+        status: quote?.status ?? null,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+
+      continue;
+    }
+
+    const result = await runDatabaseOperation(
+      "insert_paper_source_route_snapshot",
+      () =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO paper_source_route_snapshots (
+             source_signature,
+             mint,
+             age_bucket,
+             probe_token_amount,
+             executable,
+             reason,
+             http_status,
+             out_sol,
+             effective_price_sol_per_token,
+             router,
+             checked_at
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            item.sourceSignature,
+            item.mint,
+            item.ageBucket,
+            item.probeTokenAmount,
+            quote?.executable === true ? 1 : 0,
+            reason,
+            quote?.status ?? null,
+            Number.isFinite(Number(quote?.outSOL))
+              ? Number(quote.outSOL)
+              : null,
+            Number.isFinite(
+              Number(
+                quote?.effectivePriceSOLPerToken
+              )
+            )
+              ? Number(
+                  quote.effectivePriceSOLPerToken
+                )
+              : null,
+            quote?.router || null,
+            new Date().toISOString()
+          )
+          .run()
+    );
+
+    const inserted =
+      Number(result?.meta?.changes ?? 0) === 1;
+
+    if (inserted) {
+      checked += 1;
+
+      if (quote?.executable === true) {
+        executable += 1;
+      } else {
+        noRoute += 1;
+      }
+    }
+
+    console.log({
+      message:
+        quote?.executable === true
+          ? "✅ ROUTE PERSISTENCE EXECUTABLE"
+          : "⛔ ROUTE PERSISTENCE NO ROUTE",
+      sourceSignature: item.sourceSignature,
+      mint: item.mint,
+      ageBucket: item.ageBucket,
+      ageSeconds: item.ageSeconds,
+      initialRouteCheckedAt:
+        item.initialRouteCheckedAt,
+      probeTokenAmount: item.probeTokenAmount,
+      executable:
+        quote?.executable === true,
+      reason,
+      status: quote?.status ?? null,
+      outSOL:
+        Number.isFinite(Number(quote?.outSOL))
+          ? Number(quote.outSOL)
+          : null,
+      router: quote?.router || null,
+      inserted,
+      behavior:
+        "OBSERVATION_ONLY_NO_BUY_FILTER",
+      execution: "DISABLED",
+      realMoney: false,
+    });
+  }
+
+  return {
+    checked,
+    executable,
+    noRoute,
+    deferred,
+    requested: due.length,
+  };
+}
 export default {
   async scheduled(controller, env, ctx) {
     if (!env?.DB) {
@@ -3401,7 +3672,7 @@ export default {
       });
     }
 
-    try {
+        try {
       await runPaperSourceRouteObservationBatch(env, 4);
     } catch (error) {
       console.error({
@@ -3413,8 +3684,19 @@ export default {
         realMoney: false,
       });
     }
+    try {
+      await runPaperSourceRoutePersistenceBatch(env, 4);
+    } catch (error) {
+      console.error({
+        message: "❌ ROUTE PERSISTENCE OBSERVATION ERROR",
+        error: String(error),
+        behavior:
+          "observation_failed_exit_engine_already_completed",
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    }
     },
-    
   async fetch(request, env) {
     const url = new URL(request.url);
 
