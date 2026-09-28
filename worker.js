@@ -3448,6 +3448,44 @@ export default {
         serverTime: new Date().toISOString(),
       });
     }
+        if (
+      request.method === "GET" &&
+      url.pathname === "/monitor/near-entry"
+    ) {
+      if (!env?.DB) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "database_error",
+            execution: "DISABLED",
+            realMoney: false,
+          },
+          503
+        );
+      }
+
+      const row = await runDatabaseOperation(
+        "monitor_near_entry",
+        () =>
+          env.DB.prepare(
+            `SELECT
+               COUNT(*) AS near_entry_checks,
+               MAX(checked_at) AS latest_near_entry_check
+             FROM paper_source_route_checks
+             WHERE probe_basis LIKE 'NEAR_ENTRY%'`
+          ).first()
+      );
+
+      return jsonResponse({
+        ok: true,
+        nearEntryChecks:
+          Number(row?.near_entry_checks || 0),
+        latestNearEntryCheck:
+          row?.latest_near_entry_check || null,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+        }
     if (request.method === "POST") {
       if (!env?.DB) {
         console.error({
