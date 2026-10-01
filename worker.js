@@ -1,5 +1,6 @@
 import {
   fetchPaperExitSolPrices,
+  fetchJupiterExecutableBuyQuote,
   fetchJupiterExecutableSellQuote,
 } from "./price-provider.js";
 const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
@@ -2863,7 +2864,474 @@ priceMap = await fetchPaperExitSolPrices(
 
   return summary;
 }
+async function runImmediateEntryObservation(buySignal, env) {
+  if (!buySignal?.signature || !buySignal?.mint) {
+    return {
+      inserted: false,
+      skipped: true,
+      reason: "invalid_buy_signal",
+    };
+  }
 
+  const sourceSignature = buySignal.signature;
+  const mint = buySignal.mint;
+  const detector =
+    buySignal.detector || "OKX_EXACT_PATTERN";
+
+  const sourceInputSOL =
+    Number(buySignal.inputSOL || 0);
+
+  const sourceTokenAmount =
+    Number(buySignal.tokenAmount || 0);
+
+  const sourceEntryPriceSOLPerToken =
+    sourceInputSOL > 0 && sourceTokenAmount > 0
+      ? sourceInputSOL / sourceTokenAmount
+      : 0;
+
+  if (
+    !Number.isFinite(sourceInputSOL) ||
+    sourceInputSOL <= 0 ||
+    !Number.isFinite(sourceTokenAmount) ||
+    sourceTokenAmount <= 0 ||
+    !Number.isFinite(sourceEntryPriceSOLPerToken) ||
+    sourceEntryPriceSOLPerToken <= 0
+  ) {
+    return {
+      inserted: false,
+      skipped: true,
+      reason: "invalid_source_entry",
+    };
+  }
+
+  const [config, account] = await Promise.all([
+    getPaperCopyConfig(env),
+    getPaperCopyAccount(env),
+  ]);
+
+  /*
+   * Observation sizing intentionally ignores occupied
+   * paper-copy slots/exposure so every accepted source
+   * BUY_SIGNAL can be measured at the configured target
+   * copy size. It does not mutate the paper account.
+   */
+  const { price: solUsdPrice } =
+    await getSolUsdPrice(account);
+
+  const sizing = buildPaperCopySizing({
+    account,
+    config,
+    openStats: {
+      openCount: 0,
+      openExposureLamports: 0,
+    },
+    solUsdPrice,
+  });
+
+  if (!sizing.ok) {
+    console.warn({
+      message:
+        "⚠️ IMMEDIATE ENTRY OBSERVATION SKIPPED",
+      sourceSignature,
+      mint,
+      detector,
+      reason: sizing.reason,
+      execution: "DISABLED",
+      realMoney: false,
+    });
+
+    return {
+      inserted: false,
+      skipped: true,
+      reason: sizing.reason,
+    };
+  }
+
+  const targetCopyLamports =
+    Math.floor(
+      Number(sizing.finalNotionalLamports || 0)
+    );
+
+  const targetCopySOL =
+    lamportsToSOL(targetCopyLamports);
+
+  if (
+    !Number.isInteger(targetCopyLamports) ||
+    targetCopyLamports <= 0 ||
+    !Number.isFinite(targetCopySOL) ||
+    targetCopySOL <= 0
+  ) {
+    return {
+      inserted: false,
+      skipped: true,
+      reason: "invalid_target_copy_size",
+    };
+  }
+
+  const detectedAt =
+    buySignal.detectedAt ||
+    new Date().toISOString();
+
+  const detectedAtMs =
+    Date.parse(detectedAt);
+
+  const quoteStartedAt =
+    new Date().toISOString();
+
+  const buyQuote =
+    await fetchJupiterExecutableBuyQuote({
+      mint,
+      inputLamports: targetCopyLamports,
+      wrappedSolMint: WRAPPED_SOL_MINT,
+      jupiterApiKey:
+        env?.JUPITER_API_KEY || null,
+    });
+
+  const buyQuoteCompletedAtMs =
+    Date.now();
+
+  const detectionToQuoteMs =
+    Number.isFinite(detectedAtMs)
+      ? Math.max(
+          0,
+          buyQuoteCompletedAtMs - detectedAtMs
+        )
+      : null;
+
+  let sellbackQuote = null;
+
+  if (
+    buyQuote?.executable === true &&
+    Number.isFinite(
+      Number(buyQuote?.outTokenAmount)
+    ) &&
+    Number(buyQuote.outTokenAmount) > 0
+  ) {
+    sellbackQuote =
+      await fetchJupiterExecutableSellQuote({
+        mint,
+        tokenAmount:
+          Number(buyQuote.outTokenAmount),
+        wrappedSolMint: WRAPPED_SOL_MINT,
+        jupiterApiKey:
+          env?.JUPITER_API_KEY || null,
+      });
+  }
+
+  const buyEffectivePrice =
+    Number(
+      buyQuote?.effectivePriceSOLPerToken
+    );
+
+  const entryGapPct =
+    buyQuote?.executable === true &&
+    Number.isFinite(buyEffectivePrice) &&
+    buyEffectivePrice > 0
+      ? (
+          (
+            buyEffectivePrice /
+            sourceEntryPriceSOLPerToken
+          ) - 1
+        ) * 100
+      : null;
+
+  const sellbackOutSOL =
+    Number(sellbackQuote?.outSOL);
+
+  const roundtripRecoveryPct =
+    sellbackQuote?.executable === true &&
+    Number.isFinite(sellbackOutSOL) &&
+    sellbackOutSOL > 0
+      ? (
+          sellbackOutSOL /
+          targetCopySOL
+        ) * 100
+      : null;
+
+  const checkedAt =
+    new Date().toISOString();
+
+  const result =
+    await runDatabaseOperation(
+      "insert_immediate_entry_observation",
+      () =>
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO paper_immediate_entry_checks (
+             source_signature,
+             mint,
+             detector,
+             source_input_sol,
+             source_token_amount,
+             source_entry_price_sol_per_token,
+             target_copy_lamports,
+             target_copy_sol,
+             detected_at,
+             quote_started_at,
+             buy_executable,
+             buy_reason,
+             buy_http_status,
+             buy_input_lamports,
+             buy_out_raw_amount,
+             buy_out_token_amount,
+             buy_token_decimals,
+             buy_effective_price_sol_per_token,
+             buy_router,
+             buy_request_id,
+             buy_response_body,
+             sellback_executable,
+             sellback_reason,
+             sellback_http_status,
+             sellback_out_lamports,
+             sellback_out_sol,
+             sellback_effective_price_sol_per_token,
+             sellback_router,
+             sellback_request_id,
+             sellback_response_body,
+             entry_gap_pct,
+             roundtrip_recovery_pct,
+             detection_to_quote_ms,
+             checked_at
+           )
+           VALUES (
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+             ?, ?, ?, ?
+           )`
+        )
+          .bind(
+            sourceSignature,
+            mint,
+            detector,
+            sourceInputSOL,
+            sourceTokenAmount,
+            sourceEntryPriceSOLPerToken,
+            targetCopyLamports,
+            targetCopySOL,
+            detectedAt,
+            quoteStartedAt,
+
+            buyQuote?.executable === true
+              ? 1
+              : 0,
+
+            buyQuote?.reason ||
+              "quote_unavailable",
+
+            buyQuote?.status ?? null,
+
+            targetCopyLamports,
+
+            buyQuote?.outRawAmount != null
+              ? String(buyQuote.outRawAmount)
+              : null,
+
+            Number.isFinite(
+              Number(
+                buyQuote?.outTokenAmount
+              )
+            )
+              ? Number(
+                  buyQuote.outTokenAmount
+                )
+              : null,
+
+            Number.isInteger(
+              buyQuote?.decimals
+            )
+              ? buyQuote.decimals
+              : null,
+
+            Number.isFinite(
+              Number(
+                buyQuote
+                  ?.effectivePriceSOLPerToken
+              )
+            )
+              ? Number(
+                  buyQuote
+                    .effectivePriceSOLPerToken
+                )
+              : null,
+
+            buyQuote?.router || null,
+            buyQuote?.requestId || null,
+            buyQuote?.responseBody || null,
+
+            sellbackQuote
+              ? (
+                  sellbackQuote.executable === true
+                    ? 1
+                    : 0
+                )
+              : null,
+
+            sellbackQuote?.reason ||
+              (
+                buyQuote?.executable === true
+                  ? null
+                  : "buy_not_executable"
+              ),
+
+            sellbackQuote?.status ?? null,
+
+            Number.isFinite(
+              Number(
+                sellbackQuote
+                  ?.outAmountLamports
+              )
+            )
+              ? Math.floor(
+                  Number(
+                    sellbackQuote
+                      .outAmountLamports
+                  )
+                )
+              : null,
+
+            Number.isFinite(
+              sellbackOutSOL
+            )
+              ? sellbackOutSOL
+              : null,
+
+            Number.isFinite(
+              Number(
+                sellbackQuote
+                  ?.effectivePriceSOLPerToken
+              )
+            )
+              ? Number(
+                  sellbackQuote
+                    .effectivePriceSOLPerToken
+                )
+              : null,
+
+            sellbackQuote?.router || null,
+            sellbackQuote?.requestId || null,
+            sellbackQuote?.responseBody || null,
+
+            Number.isFinite(entryGapPct)
+              ? entryGapPct
+              : null,
+
+            Number.isFinite(
+              roundtripRecoveryPct
+            )
+              ? roundtripRecoveryPct
+              : null,
+
+            Number.isFinite(
+              detectionToQuoteMs
+            )
+              ? Math.floor(
+                  detectionToQuoteMs
+                )
+              : null,
+
+            checkedAt
+          )
+          .run()
+    );
+
+  const inserted =
+    Number(
+      result?.meta?.changes ?? 0
+    ) === 1;
+
+  console.log({
+    message:
+      "🔬 IMMEDIATE ENTRY OBSERVATION",
+    sourceSignature,
+    mint,
+    detector,
+    inserted,
+    targetCopyLamports,
+    targetCopySOL,
+
+    buyExecutable:
+      buyQuote?.executable === true,
+
+    buyReason:
+      buyQuote?.reason || null,
+
+    buyEffectivePriceSOLPerToken:
+      Number.isFinite(buyEffectivePrice)
+        ? buyEffectivePrice
+        : null,
+
+    sellbackExecutable:
+      sellbackQuote?.executable === true,
+
+    sellbackReason:
+      sellbackQuote?.reason || null,
+
+    sellbackOutSOL:
+      Number.isFinite(sellbackOutSOL)
+        ? sellbackOutSOL
+        : null,
+
+    entryGapPct:
+      Number.isFinite(entryGapPct)
+        ? entryGapPct
+        : null,
+
+    roundtripRecoveryPct:
+      Number.isFinite(
+        roundtripRecoveryPct
+      )
+        ? roundtripRecoveryPct
+        : null,
+
+    detectionToQuoteMs:
+      Number.isFinite(
+        detectionToQuoteMs
+      )
+        ? detectionToQuoteMs
+        : null,
+
+    execution: "DISABLED",
+    realMoney: false,
+  });
+
+  return {
+    inserted,
+    skipped: false,
+    duplicate: !inserted,
+    sourceSignature,
+    mint,
+    targetCopyLamports,
+    targetCopySOL,
+
+    buyExecutable:
+      buyQuote?.executable === true,
+
+    sellbackExecutable:
+      sellbackQuote?.executable === true,
+
+    entryGapPct:
+      Number.isFinite(entryGapPct)
+        ? entryGapPct
+        : null,
+
+    roundtripRecoveryPct:
+      Number.isFinite(
+        roundtripRecoveryPct
+      )
+        ? roundtripRecoveryPct
+        : null,
+
+    detectionToQuoteMs:
+      Number.isFinite(
+        detectionToQuoteMs
+      )
+        ? detectionToQuoteMs
+        : null,
+
+    execution: "DISABLED",
+    realMoney: false,
+  };
+}                                                     }
 async function handleWebhook(request, env) {
   let body;
 
