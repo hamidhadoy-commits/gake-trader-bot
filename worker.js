@@ -4314,7 +4314,7 @@ return jsonResponse(
   },
   200
 );
-
+}
     return jsonResponse({ ok: false, error: "method_not_allowed" }, 405);
   },
 };
