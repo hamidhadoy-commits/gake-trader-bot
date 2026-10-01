@@ -3331,7 +3331,7 @@ async function runImmediateEntryObservation(buySignal, env) {
     execution: "DISABLED",
     realMoney: false,
   };
-}                                                     }
+}                                                     
 async function handleWebhook(request, env) {
   let body;
 
