@@ -3426,7 +3426,31 @@ async function handleWebhook(request, env) {
 
       buySignals++;
       console.log(signal);
-
+      try {
+        await runImmediateEntryObservation(
+          signal,
+          env
+        );
+      } catch (error) {
+        console.error({
+          message:
+            "❌ IMMEDIATE ENTRY OBSERVATION ERROR",
+          sourceSignature:
+            signal.signature,
+          mint:
+            signal.mint,
+          detector:
+            signal.detector,
+          error:
+            String(error),
+          behavior:
+            "observation_failed_paper_pipeline_continues",
+          execution:
+            "DISABLED",
+          realMoney:
+            false,
+        });
+      }
       const paperBuyResult = await createPaperBuy(signal, env);
 
       if (!paperBuyResult) {
