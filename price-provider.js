@@ -614,7 +614,234 @@ async function fetchCoinGeckoMarkSolPrices(
 
   return prices;
 }
+export async function fetchJupiterExecutableBuyQuote({
+  mint,
+  inputLamports,
+  wrappedSolMint = DEFAULT_WRAPPED_SOL_MINT,
+  jupiterApiKey = null,
+} = {}) {
+  const lamports = Number(inputLamports);
 
+  if (!mint) {
+    return {
+      executable: false,
+      reason: "missing_mint",
+    };
+  }
+
+  if (!jupiterApiKey) {
+    return {
+      executable: false,
+      reason: "missing_api_key",
+      mint,
+    };
+  }
+
+  if (
+    !Number.isFinite(lamports) ||
+    lamports <= 0 ||
+    !Number.isInteger(lamports)
+  ) {
+    return {
+      executable: false,
+      reason: "invalid_input_lamports",
+      mint,
+      inputLamports: lamports,
+    };
+  }
+
+  const decimalsByMint =
+    await fetchJupiterTokenDecimals(
+      [mint],
+      jupiterApiKey
+    );
+
+  const decimals = decimalsByMint.get(mint);
+
+  if (!Number.isInteger(decimals)) {
+    return {
+      executable: false,
+      reason: "missing_token_decimals",
+      mint,
+      inputLamports: lamports,
+    };
+  }
+
+  const url =
+    `${JUPITER_SWAP_ORDER_URL}?` +
+    new URLSearchParams({
+      inputMint: wrappedSolMint,
+      outputMint: mint,
+      amount: String(lamports),
+    }).toString();
+
+  let response = null;
+
+  for (
+    let attempt = 0;
+    attempt <= RETRY_DELAYS_MS.length;
+    attempt++
+  ) {
+    try {
+      response = await fetchJupiterWithPacing(
+        url,
+        jupiterApiKey
+      );
+    } catch (error) {
+      if (attempt < RETRY_DELAYS_MS.length) {
+        const delayMs =
+          RETRY_DELAYS_MS[attempt];
+        await sleep(delayMs);
+        continue;
+      }
+
+      return {
+        executable: false,
+        reason: "network_or_timeout",
+        mint,
+        inputLamports: lamports,
+        decimals,
+        error: String(error),
+      };
+    }
+
+    if (response.ok) break;
+
+    let responseBody = null;
+
+    try {
+      responseBody = await response.text();
+    } catch (bodyError) {
+      responseBody =
+        `UNREADABLE_BODY: ${String(bodyError)}`;
+    }
+
+    if (
+      (response.status === 429 ||
+        response.status >= 500) &&
+      attempt < RETRY_DELAYS_MS.length
+    ) {
+      const delayMs =
+        RETRY_DELAYS_MS[attempt];
+      await sleep(delayMs);
+      continue;
+    }
+
+    const noRoute =
+      response.status === 400 &&
+      /failed to get quotes/i.test(
+        String(responseBody || "")
+      );
+
+    return {
+      executable: false,
+      reason: noRoute
+        ? "no_route"
+        : "http_error",
+      mint,
+      inputLamports: lamports,
+      decimals,
+      status: response.status,
+      responseBody,
+    };
+  }
+
+  if (!response?.ok) {
+    return {
+      executable: false,
+      reason: "quote_provider_unavailable",
+      mint,
+      inputLamports: lamports,
+      decimals,
+      status: response?.status ?? null,
+    };
+  }
+
+  try {
+    const payload = await response.json();
+
+    const outRawAmount =
+      String(payload?.outAmount ?? "");
+
+    if (!/^\d+$/.test(outRawAmount)) {
+      return {
+        executable: false,
+        reason: "missing_or_invalid_out_amount",
+        mint,
+        inputLamports: lamports,
+        decimals,
+        status: response.status,
+        router: payload?.router || null,
+        requestId: payload?.requestId || null,
+        errorCode: payload?.errorCode ?? null,
+        errorMessage:
+          payload?.errorMessage ||
+          payload?.error ||
+          null,
+      };
+    }
+
+    const outRawAmountNumber =
+      Number(outRawAmount);
+
+    const outTokenAmount =
+      outRawAmountNumber / 10 ** decimals;
+
+    const inputSOL =
+      lamports / 1_000_000_000;
+
+    const effectivePriceSOLPerToken =
+      inputSOL / outTokenAmount;
+
+    if (
+      !Number.isFinite(outRawAmountNumber) ||
+      outRawAmountNumber <= 0 ||
+      !Number.isFinite(outTokenAmount) ||
+      outTokenAmount <= 0 ||
+      !Number.isFinite(inputSOL) ||
+      inputSOL <= 0 ||
+      !Number.isFinite(
+        effectivePriceSOLPerToken
+      ) ||
+      effectivePriceSOLPerToken <= 0
+    ) {
+      return {
+        executable: false,
+        reason: "invalid_quote_math",
+        mint,
+        inputLamports: lamports,
+        outRawAmount,
+        decimals,
+        status: response.status,
+      };
+    }
+
+    return {
+      executable: true,
+      reason: "quote_available",
+      mint,
+      inputLamports: lamports,
+      inputSOL,
+      outRawAmount,
+      outTokenAmount,
+      decimals,
+      status: response.status,
+      effectivePriceSOLPerToken,
+      router: payload?.router || null,
+      requestId: payload?.requestId || null,
+    };
+  } catch (error) {
+    return {
+      executable: false,
+      reason: "invalid_json",
+      mint,
+      inputLamports: lamports,
+      decimals,
+      status: response.status,
+      error: String(error),
+    };
+  }
+      }
 export async function fetchJupiterExecutableSellQuote({
   mint,
   tokenAmount,
