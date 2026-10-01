@@ -4189,7 +4189,7 @@ export default {
       });
     }
     },
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (
@@ -4279,8 +4279,41 @@ export default {
         );
       }
 
-      return handleWebhook(request, env);
+      const backgroundRequest = request.clone();
+
+ctx.waitUntil(
+  (async () => {
+    try {
+      const response =
+        await handleWebhook(backgroundRequest, env);
+
+      console.log({
+        message: "✅ WEBHOOK BACKGROUND COMPLETE",
+        status: response.status,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+    } catch (error) {
+      console.error({
+        message: "❌ WEBHOOK BACKGROUND ERROR",
+        error: String(error),
+        execution: "DISABLED",
+        realMoney: false,
+      });
     }
+  })()
+);
+
+return jsonResponse(
+  {
+    ok: true,
+    accepted: true,
+    processing: "BACKGROUND",
+    execution: "DISABLED",
+    realMoney: false,
+  },
+  200
+);
 
     return jsonResponse({ ok: false, error: "method_not_allowed" }, 405);
   },
