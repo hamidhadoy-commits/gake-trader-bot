@@ -4279,8 +4279,20 @@ export default {
         );
       }
 
-      const backgroundRequest = request.clone();
+      const rawBody = await request.text();
 
+const backgroundRequest = new Request(
+  request.url,
+  {
+    method: "POST",
+    headers: {
+      "content-type":
+        request.headers.get("content-type") ||
+        "application/json",
+    },
+    body: rawBody,
+  }
+);
 ctx.waitUntil(
   (async () => {
     try {
