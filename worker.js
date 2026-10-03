@@ -3,6 +3,7 @@ import {
   fetchJupiterExecutableBuyQuote,
   fetchJupiterExecutableSellQuote,
 } from "./price-provider.js";
+import { fetchLiveSolUsdPrice } from "./sol-usd-price.js";
 const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -11,8 +12,6 @@ const OKX_INPUT_TOTAL_LAMPORTS = 1_000_000;
 const TERMINAL_ACTIONS = ["NO_MATCH", "REJECTED", "PAPER_BUY"];
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const BPS_DENOMINATOR = 10_000;
-const SOL_USD_PRICE_URL =
-  "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd";
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -783,45 +782,28 @@ function usdToLamports(usd, solUsdPrice) {
   return Math.floor((usd / solUsdPrice) * LAMPORTS_PER_SOL);
 }
 
-async function getSolUsdPrice(account) {
+async function getSolUsdPrice(account, env) {
   const fallback = Number(account?.initial_sol_usd_price || 0);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2500);
-
   try {
-    const response = await fetch(SOL_USD_PRICE_URL, {
-      method: "GET",
-      headers: { accept: "application/json" },
-      signal: controller.signal,
+    const live = await fetchLiveSolUsdPrice({
+      coingeckoApiKey: env?.COINGECKO_API_KEY || null,
+      jupiterApiKey: env?.JUPITER_API_KEY || null,
     });
-
-    if (!response.ok) {
-      throw new Error(`SOL/USD HTTP ${response.status}`);
+    if (live.source !== "COINGECKO") {
+      console.log({ message: "💹 SOL/USD LIVE FALLBACK", ...live });
     }
-
-    const payload = await response.json();
-    const price = Number(payload?.solana?.usd);
-
-    if (!Number.isFinite(price) || price <= 0) {
-      throw new Error("Invalid SOL/USD response");
-    }
-
-    return { price, source: "COINGECKO" };
+    return live;
   } catch (error) {
     if (!Number.isFinite(fallback) || fallback <= 0) {
       throw new DatabaseError("resolve_sol_usd_price", error);
     }
-
     console.warn({
       message: "⚠️ SOL/USD FALLBACK",
       error: String(error),
       fallbackPrice: fallback,
       fallbackSource: "ACCOUNT_INITIAL_PRICE",
     });
-
     return { price: fallback, source: "ACCOUNT_INITIAL_PRICE" };
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -1037,7 +1019,7 @@ async function createPaperCopyBuy(buySignal, env) {
     };
   }
 
-  const { price: solUsdPrice, source: solUsdSource } = await getSolUsdPrice(account);
+  const { price: solUsdPrice, source: solUsdSource } = await getSolUsdPrice(account, env);
   const sizing = buildPaperCopySizing({
     account,
     config,
@@ -2916,7 +2898,7 @@ async function runImmediateEntryObservation(buySignal, env) {
    * copy size. It does not mutate the paper account.
    */
   const { price: solUsdPrice } =
-    await getSolUsdPrice(account);
+    await getSolUsdPrice(account, env);
 
   const sizing = buildPaperCopySizing({
     account,
@@ -3599,7 +3581,7 @@ async function runPaperSourceRouteObservationBatch(
   ]);
 
   const { price: solUsdPrice } =
-    await getSolUsdPrice(account);
+    await getSolUsdPrice(account, env);
 
   /*
    * Reuse the exact Paper Copy sizing logic,
