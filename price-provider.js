@@ -1225,11 +1225,10 @@ async function fetchDexScreenerSolPrices(
             "⚠️ DEXSCREENER RATE LIMITED",
           status: response.status,
           behavior:
-            "position_without_price_will_be_skipped",
+            "stop_dex_requests_for_this_tick_keep_collected_prices",
         });
 
-        failed = true;
-        break;
+        return prices;
       }
 
       if (
@@ -1308,6 +1307,7 @@ export async function fetchPaperExitSolPrices(
     wrappedSolMint =
       DEFAULT_WRAPPED_SOL_MINT,
     coingeckoApiKey = null,
+    jupiterApiKey = null,
   } = {}
 ) {
   const uniqueMints = [
@@ -1334,18 +1334,58 @@ export async function fetchPaperExitSolPrices(
     });
   }
 
+  const coinGeckoPriced = markPrices.size;
+  const missingMints = () =>
+    uniqueMints.filter((mint) => !markPrices.has(mint));
+
+  // These are mark prices only. The exit engine still requires a
+  // separate executable sell quote for the position's actual amount.
+  async function addMissingPrices(provider, fetchPrices) {
+    const missing = missingMints();
+    if (!missing.length) return 0;
+    let added = 0;
+
+    try {
+      const fallbackPrices = await fetchPrices(missing);
+      for (const mint of missing) {
+        const info = fallbackPrices.get(mint);
+        const price = Number(info?.priceSOLPerToken);
+        if (!Number.isFinite(price) || price <= 0) continue;
+        markPrices.set(mint, info);
+        added++;
+      }
+    } catch (error) {
+      console.warn({
+        message: "⚠️ PAPER MARK FALLBACK ERROR",
+        provider,
+        reason: "unexpected_exception",
+        error: String(error),
+      });
+    }
+
+    return added;
+  }
+
+  const jupiterPriced = jupiterApiKey
+    ? await addMissingPrices("JUPITER_PRICE_V3", (missing) =>
+        fetchJupiterSolPrices(missing, wrappedSolMint, jupiterApiKey)
+      )
+    : 0;
+  const dexScreenerPriced = await addMissingPrices(
+    "DEXSCREENER_SOL_QUOTE",
+    (missing) => fetchDexScreenerSolPrices(missing, wrappedSolMint)
+  );
+
   console.log({
     message:
       "💹 PAPER MARK PRICE PROVIDER",
     requested: uniqueMints.length,
-    coinGeckoPriced:
-      markPrices.size,
-    missing: uniqueMints.filter(
-      (mint) =>
-        !markPrices.has(mint)
-    ).length,
+    coinGeckoPriced,
+    jupiterPriced,
+    dexScreenerPriced,
+    missing: missingMints().length,
     source:
-      "COINGECKO_DEMO_ONCHAIN",
+      "COINGECKO_THEN_JUPITER_PRICE_THEN_DEXSCREENER",
     execution: "DISABLED",
     realMoney: false,
   });
