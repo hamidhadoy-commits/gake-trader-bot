@@ -18,6 +18,7 @@ const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
 
 let lastJupiterRequestStartedAt = 0;
+let jupiterRequestStartQueue = Promise.resolve();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,25 +43,36 @@ async function fetchWithTimeout(
 }
 
 async function fetchJupiterWithPacing(url, jupiterApiKey) {
-  const now = Date.now();
-  const waitMs = Math.max(
-    0,
-    JUPITER_MIN_REQUEST_SPACING_MS - (now - lastJupiterRequestStartedAt)
-  );
-
-  if (waitMs > 0) {
-    await sleep(waitMs);
-  }
-
-  lastJupiterRequestStartedAt = Date.now();
-
-  return fetchWithTimeout(url, {
-    method: "GET",
-    headers: {
-      accept: "application/json",
-      "x-api-key": jupiterApiKey,
-    },
+  let releaseStart;
+  const previousStart = jupiterRequestStartQueue;
+  jupiterRequestStartQueue = new Promise((resolve) => {
+    releaseStart = resolve;
   });
+  await previousStart;
+  try {
+    const now = Date.now();
+    const waitMs = Math.max(
+      0,
+      JUPITER_MIN_REQUEST_SPACING_MS - (now - lastJupiterRequestStartedAt)
+    );
+
+    if (waitMs > 0) {
+      await sleep(waitMs);
+    }
+
+    lastJupiterRequestStartedAt = Date.now();
+
+    return fetchWithTimeout(url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        "x-api-key": jupiterApiKey,
+      },
+    });
+  } finally {
+    // Release after starting fetch; response time must not hold the queue.
+    releaseStart();
+  }
 }
 
 async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
