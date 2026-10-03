@@ -789,9 +789,13 @@ async function getSolUsdPrice(account, env) {
       coingeckoApiKey: env?.COINGECKO_API_KEY || null,
       jupiterApiKey: env?.JUPITER_API_KEY || null,
     });
-    if (live.source !== "COINGECKO") {
-      console.log({ message: "💹 SOL/USD LIVE FALLBACK", ...live });
-    }
+    console.log({
+      message: "SOL/USD LIVE PRICE",
+      price: live.price,
+      source: live.source,
+      execution: "DISABLED",
+      realMoney: false,
+    });
     return live;
   } catch (error) {
     if (!Number.isFinite(fallback) || fallback <= 0) {
