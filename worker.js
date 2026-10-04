@@ -4,6 +4,7 @@ import {
   fetchJupiterExecutableSellQuote,
 } from "./price-provider.js";
 import { fetchLiveSolUsdPrice } from "./sol-usd-price.js";
+import { runExactEntryExitObservationBatch } from "./exact-exit-observation.js";
 const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -4180,6 +4181,19 @@ export default {
           "observation_failed_exit_engine_already_completed",
         execution: "DISABLED",
         realMoney: false,
+      });
+    }
+    try {
+      await runExactEntryExitObservationBatch(env, {
+        getConfig: getPaperCopyConfig,
+        sellQuote: fetchJupiterExecutableSellQuote,
+        databaseOperation: runDatabaseOperation,
+        limit: 4,
+      });
+    } catch (error) {
+      console.error({
+        message: "EXACT ENTRY EXIT OBSERVATION ERROR",
+        error: String(error), execution: "DISABLED", realMoney: false,
       });
     }
     },

@@ -906,10 +906,13 @@ export async function fetchJupiterExecutableBuyQuote({
 export async function fetchJupiterExecutableSellQuote({
   mint,
   tokenAmount,
+  rawTokenAmount = null,
+  tokenDecimals = null,
   wrappedSolMint = DEFAULT_WRAPPED_SOL_MINT,
   jupiterApiKey = null,
 } = {}) {
-  const amount = Number(tokenAmount);
+  const exactRaw = rawTokenAmount !== null || tokenDecimals !== null;
+  let amount = Number(tokenAmount);
 
   if (!mint) {
     return {
@@ -926,6 +929,22 @@ export async function fetchJupiterExecutableSellQuote({
     };
   }
 
+  let decimals;
+  let rawAmount;
+  if (exactRaw) {
+    if (typeof rawTokenAmount !== "string" ||
+        !/^[1-9]\d*$/.test(rawTokenAmount) ||
+        !Number.isInteger(tokenDecimals) ||
+        tokenDecimals < 0 || tokenDecimals > 18) {
+      return { executable: false, reason: "invalid_exact_raw_amount", mint };
+    }
+    rawAmount = rawTokenAmount;
+    decimals = tokenDecimals;
+    amount = Number(rawAmount) / 10 ** decimals;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return { executable: false, reason: "invalid_exact_raw_amount", mint };
+    }
+  } else {
   if (!Number.isFinite(amount) || amount <= 0) {
     return {
       executable: false,
@@ -941,7 +960,7 @@ export async function fetchJupiterExecutableSellQuote({
       jupiterApiKey
     );
 
-  const decimals = decimalsByMint.get(mint);
+  decimals = decimalsByMint.get(mint);
 
   if (!Number.isInteger(decimals)) {
     return {
@@ -952,7 +971,7 @@ export async function fetchJupiterExecutableSellQuote({
     };
   }
 
-  const rawAmount = humanAmountToRaw(
+  rawAmount = humanAmountToRaw(
     amount,
     decimals
   );
@@ -965,6 +984,8 @@ export async function fetchJupiterExecutableSellQuote({
       tokenAmount: amount,
       decimals,
     };
+  }
+
   }
 
   const url =
@@ -1063,6 +1084,12 @@ export async function fetchJupiterExecutableSellQuote({
 
   try {
     const payload = await response.json();
+    if (exactRaw && String(payload?.inAmount ?? "") !== rawAmount) {
+      return {
+        executable: false, reason: "quote_input_amount_mismatch", mint,
+        rawAmount, decimals, status: response.status,
+      };
+    }
     const outAmountLamports =
       Number(payload?.outAmount);
 
