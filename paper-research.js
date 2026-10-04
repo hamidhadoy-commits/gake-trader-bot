@@ -165,10 +165,12 @@ export async function runResearchExitCycle(env, {
   `,[markLimit]);
   const positions=result.results || [];
   if (!positions.length) return {admitted,marked:0,quotes:0,exits:0,missingPrices:0};
+  const feedStartedAt = new Date(now()).toISOString();
   const prices = await priceFeed(positions.map(p=>p.mint),{
     wrappedSolMint:WSOL,coingeckoApiKey:env?.COINGECKO_API_KEY || null,
     jupiterApiKey:env?.JUPITER_API_KEY || null,
   });
+  const feedCompletedAt = new Date(now()).toISOString();
   let quotes=0,exits=0,missingPrices=0;
   for(const p of positions) {
     const info=prices.get(p.mint);
@@ -180,9 +182,25 @@ export async function runResearchExitCycle(env, {
       WHERE source_signature=? AND status='RESEARCH_OPEN'
     `,[new Date(now()).toISOString(),valid?mark:p.highest_price_sol,
       valid?mark:null,valid?(info.source || "UNKNOWN"):null,p.source_signature],"run");
-    if(!valid){missingPrices++;continue;}
     let current=await query(env,"SELECT * FROM paper_research_positions WHERE source_signature=?",[p.source_signature],"first");
     const config=captureResearchConfig(JSON.parse(current.config_json));
+    const planned = valid ? chooseResearchExit(current,config,mark) : null;
+    try {
+      await query(env,`
+      INSERT INTO paper_research_marks (
+        source_signature,position_revision,feed_started_at,feed_completed_at,checked_at,
+        mark_price_sol,mark_source,highest_price_sol,planned_exit_reason,
+        quote_budget_available,observation_reason
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `,[p.source_signature,current.revision,feedStartedAt,feedCompletedAt,new Date(now()).toISOString(),
+      valid?mark:null,valid?(info.source || "UNKNOWN"):null,current.highest_price_sol,
+      planned?.reason || null,quotes<quoteLimit?1:0,
+      !valid?"MISSING_PRICE":!planned?"NO_TRIGGER":quotes<quoteLimit?"ELIGIBLE":"QUOTE_BUDGET_EXHAUSTED"],"run");
+    } catch (error) {
+      console.error({message:"RESEARCH MARK HISTORY ERROR",sourceSignature:p.source_signature,
+        error:String(error),execution:"DISABLED",realMoney:false});
+    }
+    if(!valid){missingPrices++;continue;}
     // At most TP then remainder in the same tick, subject to the shared quote budget.
     for(let sequence=0;sequence<2 && quotes<quoteLimit;sequence++) {
       const intent=chooseResearchExit(current,config,mark);

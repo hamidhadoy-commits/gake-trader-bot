@@ -23,6 +23,8 @@ function setup() {
     INSERT INTO processed_signatures VALUES('history');
   `);
   db.exec(migration);db.exec(migration);
+  const markMigration=readFileSync(new URL('./paper-research-mark-history-migration.sql',import.meta.url),'utf8');
+  db.exec(markMigration);db.exec(markMigration);
   const env={JUPITER_API_KEY:'test',DB:{
     prepare(sql){return {bind(...values){return {sql,values,
       all:()=>({results:db.prepare(sql).all(...values)}),
@@ -192,5 +194,49 @@ test('disabled paper config pauses research without admitting or executing',asyn
     const r=await h.run();assert.equal(r.paused,true);assert.equal(r.quotes,0);
     assert.equal(h.position('paused'),undefined);assert.equal(h.position().status,'RESEARCH_OPEN');
     assert.equal(h.requests.length,0);
+  }finally{h.close();}
+});
+
+test('mark timeline retains successive prices and feed observation times without inventing exits',async()=>{
+  const h=await entered();try {
+    h.advance(60000);h.mark(0.000049);await h.run();
+    h.advance(60000);h.mark(0.000048);await h.run();
+    const rows=h.db.prepare('SELECT * FROM paper_research_marks ORDER BY id').all();
+    assert.deepEqual(rows.map(x=>x.mark_price_sol),[0.00005,0.000049,0.000048]);
+    assert.ok(rows.every(x=>x.mark_source==='SYNTHETIC'&&x.observation_reason==='NO_TRIGGER'));
+    assert.ok(rows.every(x=>x.feed_started_at<=x.feed_completed_at&&x.feed_completed_at<=x.checked_at));
+    assert.equal(h.requests.length,0);
+  }finally{h.close();}
+});
+test('missing mark is stored as null with missing-price reason',async()=>{
+  const h=await entered();try {
+    h.mark(NaN);await h.run();
+    const row=h.db.prepare('SELECT * FROM paper_research_marks ORDER BY id DESC LIMIT 1').get();
+    assert.equal(row.mark_price_sol,null);assert.equal(row.mark_source,null);
+    assert.equal(row.planned_exit_reason,null);assert.equal(row.observation_reason,'MISSING_PRICE');
+  }finally{h.close();}
+});
+test('trigger with exhausted quote budget is recorded without financial exit',async()=>{
+  const h=await entered();try {
+    h.deps.maxQuotes=0;h.mark(0.00004);await h.run();
+    const row=h.db.prepare('SELECT * FROM paper_research_marks ORDER BY id DESC LIMIT 1').get();
+    assert.equal(row.planned_exit_reason,'STOP_LOSS');
+    assert.equal(row.quote_budget_available,0);assert.equal(row.observation_reason,'QUOTE_BUDGET_EXHAUSTED');
+    assert.equal(h.position().status,'RESEARCH_OPEN');assert.equal(h.requests.length,0);
+  }finally{h.close();}
+});
+test('eligible mark records original revision before a successful exact exit',async()=>{
+  const h=await entered();try {
+    h.mark(0.00004);await h.run();
+    const row=h.db.prepare('SELECT * FROM paper_research_marks ORDER BY id DESC LIMIT 1').get();
+    assert.equal(row.position_revision,0);assert.equal(row.observation_reason,'ELIGIBLE');
+    assert.equal(row.planned_exit_reason,'STOP_LOSS');assert.equal(h.position().revision,1);
+  }finally{h.close();}
+});
+
+test('diagnostic mark history failure does not block a valid research exit',async()=>{
+  const h=await entered();try {
+    h.db.exec('DROP TABLE paper_research_marks');h.mark(0.00004);
+    const r=await h.run();assert.equal(r.exits,1);assert.equal(h.position().status,'RESEARCH_CLOSED');
   }finally{h.close();}
 });
