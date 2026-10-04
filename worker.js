@@ -2901,7 +2901,7 @@ async function runImmediateEntryObservation(buySignal, env) {
    * BUY_SIGNAL can be measured at the configured target
    * copy size. It does not mutate the paper account.
    */
-  const { price: solUsdPrice } =
+  const { price: solUsdPrice, source: solUsdSource } =
     await getSolUsdPrice(account, env);
 
   const sizing = buildPaperCopySizing({
@@ -3076,13 +3076,15 @@ async function runImmediateEntryObservation(buySignal, env) {
              entry_gap_pct,
              roundtrip_recovery_pct,
              detection_to_quote_ms,
-             checked_at
+             checked_at,
+             sol_usd_price,
+             sol_usd_source
            )
            VALUES (
              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-             ?, ?, ?, ?
+             ?, ?, ?, ?, ?, ?
            )`
         )
           .bind(
@@ -3215,7 +3217,9 @@ async function runImmediateEntryObservation(buySignal, env) {
                 )
               : null,
 
-            checkedAt
+            checkedAt,
+            solUsdPrice,
+            solUsdSource
           )
           .run()
     );
@@ -3234,6 +3238,8 @@ async function runImmediateEntryObservation(buySignal, env) {
     inserted,
     targetCopyLamports,
     targetCopySOL,
+    solUsdPrice,
+    solUsdSource,
 
     buyExecutable:
       buyQuote?.executable === true,
@@ -3288,6 +3294,8 @@ async function runImmediateEntryObservation(buySignal, env) {
     mint,
     targetCopyLamports,
     targetCopySOL,
+    solUsdPrice,
+    solUsdSource,
 
     buyExecutable:
       buyQuote?.executable === true,
