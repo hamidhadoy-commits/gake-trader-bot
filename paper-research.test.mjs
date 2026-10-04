@@ -25,6 +25,8 @@ function setup() {
   db.exec(migration);db.exec(migration);
   const markMigration=readFileSync(new URL('./paper-research-mark-history-migration.sql',import.meta.url),'utf8');
   db.exec(markMigration);db.exec(markMigration);
+  const metadataMigration=readFileSync(new URL('./paper-research-feed-metadata-migration.sql',import.meta.url),'utf8');
+  db.exec(metadataMigration);db.exec(metadataMigration);
   const env={JUPITER_API_KEY:'test',DB:{
     prepare(sql){return {bind(...values){return {sql,values,
       all:()=>({results:db.prepare(sql).all(...values)}),
@@ -238,5 +240,32 @@ test('diagnostic mark history failure does not block a valid research exit',asyn
   const h=await entered();try {
     h.db.exec('DROP TABLE paper_research_marks');h.mark(0.00004);
     const r=await h.run();assert.equal(r.exits,1);assert.equal(h.position().status,'RESEARCH_CLOSED');
+  }finally{h.close();}
+});
+
+test('response metadata is persisted beside its exact mark observation',async()=>{
+  const h=await entered();try{
+    const metadata={requestStartedAt:'2026-10-04T17:00:00.000Z',responseReceivedAt:'2026-10-04T17:00:00.100Z',
+      httpStatus:200,responseAgeSeconds:12,httpDate:'2026-10-04T16:59:48.000Z',cacheControl:null,cacheStatus:'HIT'};
+    h.deps.priceFeed=async mints=>new Map(mints.map(m=>[m,{priceSOLPerToken:0.000049,source:'COINGECKO_MARK_USD_RATIO',responseMetadata:metadata}]));
+    h.advance(60000);await h.run();
+    const row=h.db.prepare('SELECT * FROM paper_research_feed_metadata ORDER BY checked_at DESC LIMIT 1').get();
+    assert.deepEqual(JSON.parse(row.response_metadata_json),metadata);
+    const mark=h.db.prepare('SELECT * FROM paper_research_marks WHERE source_signature=? AND checked_at=?').get(row.source_signature,row.checked_at);
+    assert.equal(row.position_revision,mark.position_revision);assert.equal(row.mark_source,mark.mark_source);
+    assert.equal(h.requests.length,0);assert.equal(h.position().status,'RESEARCH_OPEN');
+  }finally{h.close();}
+});
+test('feed metadata without headers is explicitly unknown',async()=>{
+  const h=await entered();try{
+    const row=h.db.prepare('SELECT * FROM paper_research_feed_metadata LIMIT 1').get();
+    assert.equal(row.response_metadata_json,null);
+  }finally{h.close();}
+});
+test('metadata persistence failure preserves mark and does not block valid exit',async()=>{
+  const h=await entered();try{
+    h.db.exec('DROP TABLE paper_research_feed_metadata');h.mark(0.00004);
+    const r=await h.run();assert.equal(r.exits,1);assert.equal(h.position().status,'RESEARCH_CLOSED');
+    assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM paper_research_marks').get().n,2);
   }finally{h.close();}
 });

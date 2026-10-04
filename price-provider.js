@@ -1,3 +1,26 @@
+// Transport metadata describes the response, not the age of its market price.
+export function capturePriceResponseMetadata(response, startedAtMs, completedAtMs) {
+  const header = name => {
+    const value = response?.headers?.get?.(name);
+    return typeof value === "string" ? value.trim().slice(0,256) : null;
+  };
+  const age = header("age");
+  const ageNumber = age && /^\d+$/.test(age) ? Number(age) : NaN;
+  const date = header("date");
+  const parsedDate = date ? Date.parse(date) : NaN;
+  const timestamp = value => Number.isSafeInteger(value) && value >= 0
+    && value <= 8640000000000000 ? new Date(value).toISOString() : null;
+  return {
+    requestStartedAt: timestamp(startedAtMs),
+    responseReceivedAt: timestamp(completedAtMs),
+    httpStatus: Number.isInteger(response?.status) ? response.status : null,
+    responseAgeSeconds: Number.isSafeInteger(ageNumber) ? ageNumber : null,
+    httpDate: Number.isFinite(parsedDate) ? new Date(parsedDate).toISOString() : null,
+    cacheControl: header("cache-control"),
+    cacheStatus: header("cf-cache-status"),
+  };
+}
+
 const DEFAULT_WRAPPED_SOL_MINT =
   "So11111111111111111111111111111111111111112";
 
@@ -566,6 +589,7 @@ async function fetchCoinGeckoMarkSolPrices(
         .join(",");
 
     let response = null;
+    const requestStartedAtMs = Date.now();
 
     try {
       response = await fetchWithTimeout(url, {
@@ -583,6 +607,8 @@ async function fetchCoinGeckoMarkSolPrices(
       });
       continue;
     }
+
+    const responseMetadata = capturePriceResponseMetadata(response, requestStartedAtMs, Date.now());
 
     if (response.status === 429) {
       console.warn({
@@ -661,6 +687,7 @@ async function fetchCoinGeckoMarkSolPrices(
           source: "COINGECKO_MARK_USD_RATIO",
           tokenUsdPrice,
           solUsdPrice,
+          responseMetadata,
         });
       }
     } catch (error) {

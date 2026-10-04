@@ -185,6 +185,7 @@ export async function runResearchExitCycle(env, {
     let current=await query(env,"SELECT * FROM paper_research_positions WHERE source_signature=?",[p.source_signature],"first");
     const config=captureResearchConfig(JSON.parse(current.config_json));
     const planned = valid ? chooseResearchExit(current,config,mark) : null;
+    const observationAt = new Date(now()).toISOString();
     try {
       await query(env,`
       INSERT INTO paper_research_marks (
@@ -192,10 +193,16 @@ export async function runResearchExitCycle(env, {
         mark_price_sol,mark_source,highest_price_sol,planned_exit_reason,
         quote_budget_available,observation_reason
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    `,[p.source_signature,current.revision,feedStartedAt,feedCompletedAt,new Date(now()).toISOString(),
+    `,[p.source_signature,current.revision,feedStartedAt,feedCompletedAt,observationAt,
       valid?mark:null,valid?(info.source || "UNKNOWN"):null,current.highest_price_sol,
       planned?.reason || null,quotes<quoteLimit?1:0,
       !valid?"MISSING_PRICE":!planned?"NO_TRIGGER":quotes<quoteLimit?"ELIGIBLE":"QUOTE_BUDGET_EXHAUSTED"],"run");
+      await query(env,`
+        INSERT OR IGNORE INTO paper_research_feed_metadata (
+          source_signature,position_revision,checked_at,mark_source,response_metadata_json
+        ) VALUES (?,?,?,?,?)
+      `,[p.source_signature,current.revision,observationAt,valid?(info.source || "UNKNOWN"):null,
+        valid && info.responseMetadata ? JSON.stringify(info.responseMetadata) : null],"run");
     } catch (error) {
       console.error({message:"RESEARCH MARK HISTORY ERROR",sourceSignature:p.source_signature,
         error:String(error),execution:"DISABLED",realMoney:false});
