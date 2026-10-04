@@ -5,6 +5,7 @@ import {
 } from "./price-provider.js";
 import { fetchLiveSolUsdPrice } from "./sol-usd-price.js";
 import { runExactEntryExitObservationBatch } from "./exact-exit-observation.js";
+import { runResearchExitCycle } from "./paper-research.js";
 const GAKE_WALLET = "DNfuF1L62WWyW3pNakVkyGGFzVVhj4Yr52jSmdTyeBHm";
 const WRAPPED_SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -4196,6 +4197,20 @@ export default {
         error: String(error), execution: "DISABLED", realMoney: false,
       });
     }
+    try {
+      await runResearchExitCycle(env, {
+        getConfig: getPaperCopyConfig,
+        priceFeed: fetchPaperExitSolPrices,
+        sellQuote: fetchJupiterExecutableSellQuote,
+        maxMarks: 8,
+        maxQuotes: 4,
+      });
+    } catch (error) {
+      console.error({
+        message: "RESEARCH EXIT CYCLE ERROR",
+        error: String(error), execution: "DISABLED", realMoney: false,
+      });
+    }
     },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -4213,6 +4228,8 @@ export default {
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
+        paperResearchExitCycle: "INDEPENDENT_QUOTED_POSITIONS",
+        paperResearchCashAccount: "NONE_RESEARCH_IS_NOT_PORTFOLIO_PNL",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
         paperPriceSource: "COINGECKO_THEN_JUPITER_PRICE_THEN_DEXSCREENER",
