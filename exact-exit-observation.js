@@ -41,6 +41,14 @@ export async function runExactEntryExitObservationBatch(env, {
       Number.isInteger(row.buy_token_decimals) &&
       row.buy_token_decimals >= 0 && row.buy_token_decimals <= 18 &&
       Number.isSafeInteger(row.target_copy_lamports) && row.target_copy_lamports > 0;
+  }).sort((a, b) => {
+    // Serve the window that expires first, rather than always the oldest entry.
+    const deadline = row => {
+      const entryMs = Date.parse(row.checked_at);
+      const bucket = exactExitBucket((currentMs - entryMs) / 1000);
+      return entryMs + ({M1: 180, M3: 300, M5: 600, M10: 900}[bucket] * 1000);
+    };
+    return deadline(a) - deadline(b) || Date.parse(a.checked_at) - Date.parse(b.checked_at);
   }).slice(0, Math.max(1, Math.min(4, Math.floor(Number(limit) || 1))));
   if (!due.length) return {checked: 0, deferred: 0, execution: "DISABLED", realMoney: false};
   const config = await getConfig(env);

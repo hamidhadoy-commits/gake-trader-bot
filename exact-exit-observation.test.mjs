@@ -136,3 +136,26 @@ test('next bucket is measured once, expired entry is ignored',async()=>{
     h.advance(900000);assert.equal((await h.run()).checked,0);
   }finally {h.db.close();}
 });
+
+test('earliest window deadline wins over older backlog within four-request cap',async()=>{
+  const h=setup();try {
+    h.db.prepare('UPDATE paper_immediate_entry_checks SET checked_at=?')
+      .run(new Date(epoch-175000).toISOString());
+    for(let i=0;i<5;i++) h.db.prepare('INSERT INTO paper_immediate_entry_checks VALUES (?,?,?,?,?,?,?)')
+      .run('old'+i,'M',new Date(epoch-700000-i*1000).toISOString(),1,raw,6,40000000);
+    const r=await h.run();assert.equal(r.checked,4);assert.equal(h.calls.length,4);
+    const rows=h.db.prepare('SELECT source_signature,age_bucket FROM paper_exact_entry_exit_checks ORDER BY id').all();
+    assert.equal(rows[0].source_signature,'sig');assert.equal(rows[0].age_bucket,'M1');
+    assert.deepEqual(rows.slice(1).map(x=>x.source_signature),['old4','old3','old2']);
+  }finally {h.db.close();}
+});
+test('expiring M10 still wins over less urgent M1',async()=>{
+  const h=setup();try {
+    h.db.prepare('INSERT INTO paper_immediate_entry_checks VALUES (?,?,?,?,?,?,?)')
+      .run('urgent','M',new Date(epoch-895000).toISOString(),1,raw,6,40000000);
+    h.deps.limit=1;await h.run();
+    const row=h.db.prepare('SELECT source_signature,age_bucket FROM paper_exact_entry_exit_checks').get();
+    assert.equal(row.source_signature,'urgent');assert.equal(row.age_bucket,'M10');
+    assert.equal(h.calls.length,1);
+  }finally {h.db.close();}
+});
