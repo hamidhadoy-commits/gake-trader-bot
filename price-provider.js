@@ -78,6 +78,31 @@ async function fetchJupiterWithPacing(url, jupiterApiKey) {
   }
 }
 
+function getJupiterRetryDelay(response, fallbackMs, now = Date.now()) {
+  if (response.status !== 429) return fallbackMs;
+  const delays = [fallbackMs];
+  const reset = response.headers?.get?.("x-ratelimit-reset");
+  if (reset != null && String(reset).trim() !== "") {
+    const seconds = Number(reset);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      delays.push(Math.max(0, seconds * 1000 - now) + 50);
+    }
+  }
+  const retryAfter = response.headers?.get?.("retry-after");
+  if (retryAfter != null && String(retryAfter).trim() !== "") {
+    const text = String(retryAfter).trim();
+    const delay = /^\d+(?:\.\d+)?$/.test(text)
+      ? Number(text) * 1000
+      : /^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(text)
+        ? Date.parse(text) - now
+        : NaN;
+    if (Number.isFinite(delay) && delay >= 0) delays.push(delay);
+  }
+  const delayMs = Math.ceil(Math.max(...delays));
+  // Long quota waits are returned as HTTP429, without a premature retry.
+  return delayMs <= 5000 ? delayMs : null;
+}
+
 async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
   let response = null;
 
@@ -114,17 +139,19 @@ async function fetchJupiterWithRetry(url, jupiterApiKey, logPrefix) {
       (response.status === 429 || response.status >= 500) &&
       attempt < RETRY_DELAYS_MS.length
     ) {
-      const delayMs = RETRY_DELAYS_MS[attempt];
-      console.warn({
-        message: `⚠️ ${logPrefix} RETRY`,
-        reason:
-          response.status === 429 ? "rate_limited" : "upstream_5xx",
-        status: response.status,
-        attempt: attempt + 1,
-        delayMs,
-      });
-      await sleep(delayMs);
-      continue;
+      const delayMs = getJupiterRetryDelay(response, RETRY_DELAYS_MS[attempt]);
+      if (delayMs !== null) {
+        console.warn({
+          message: `⚠️ ${logPrefix} RETRY`,
+          reason:
+            response.status === 429 ? "rate_limited" : "upstream_5xx",
+          status: response.status,
+          attempt: attempt + 1,
+          delayMs,
+        });
+        await sleep(delayMs);
+        continue;
+      }
     }
 
     let responseBody = null;
@@ -754,10 +781,11 @@ export async function fetchJupiterExecutableBuyQuote({
         response.status >= 500) &&
       attempt < RETRY_DELAYS_MS.length
     ) {
-      const delayMs =
-        RETRY_DELAYS_MS[attempt];
-      await sleep(delayMs);
-      continue;
+      const delayMs = getJupiterRetryDelay(response, RETRY_DELAYS_MS[attempt]);
+      if (delayMs !== null) {
+        await sleep(delayMs);
+        continue;
+      }
     }
 
     const noRoute =
@@ -994,10 +1022,11 @@ export async function fetchJupiterExecutableSellQuote({
         response.status >= 500) &&
       attempt < RETRY_DELAYS_MS.length
     ) {
-      const delayMs =
-        RETRY_DELAYS_MS[attempt];
-      await sleep(delayMs);
-      continue;
+      const delayMs = getJupiterRetryDelay(response, RETRY_DELAYS_MS[attempt]);
+      if (delayMs !== null) {
+        await sleep(delayMs);
+        continue;
+      }
     }
 
     const noRoute =
