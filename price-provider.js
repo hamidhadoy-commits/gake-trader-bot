@@ -16,6 +16,9 @@ const COINGECKO_MAX_TARGET_MINTS_PER_REQUEST = 29;
 const PRICE_FETCH_TIMEOUT_MS = 7000;
 const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
+const TOKEN_DECIMALS_CACHE_TTL_MS = 300000;
+const TOKEN_DECIMALS_CACHE_MAX_ENTRIES = 256;
+const tokenDecimalsCache = new Map();
 
 let lastJupiterRequestStartedAt = 0;
 let jupiterRequestStartQueue = Promise.resolve();
@@ -243,12 +246,24 @@ async function fetchJupiterTokenDecimals(mints, jupiterApiKey) {
     return decimalsByMint;
   }
 
+  const missingMints = [];
+  const now = Date.now();
+  for (const mint of uniqueMints) {
+    const cached = tokenDecimalsCache.get(mint);
+    if (cached && now >= cached.at && now - cached.at < TOKEN_DECIMALS_CACHE_TTL_MS) {
+      decimalsByMint.set(mint, cached.decimals);
+    } else {
+      tokenDecimalsCache.delete(mint);
+      missingMints.push(mint);
+    }
+  }
+
   for (
     let offset = 0;
-    offset < uniqueMints.length;
+    offset < missingMints.length;
     offset += JUPITER_TOKENS_MAX_MINTS_PER_REQUEST
   ) {
-    const chunk = uniqueMints.slice(
+    const chunk = missingMints.slice(
       offset,
       offset + JUPITER_TOKENS_MAX_MINTS_PER_REQUEST
     );
@@ -281,6 +296,12 @@ async function fetchJupiterTokenDecimals(mints, jupiterApiKey) {
         }
 
         decimalsByMint.set(mint, decimals);
+        if (chunk.includes(mint) && item?.decimals != null && String(item.decimals).trim() !== "" && typeof item.decimals !== "boolean") {
+          tokenDecimalsCache.set(mint, { decimals, at: Date.now() });
+          while (tokenDecimalsCache.size > TOKEN_DECIMALS_CACHE_MAX_ENTRIES) {
+            tokenDecimalsCache.delete(tokenDecimalsCache.keys().next().value);
+          }
+        }
       }
     } catch (error) {
       console.warn({
