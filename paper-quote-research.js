@@ -114,7 +114,7 @@ export async function runQuoteResearchExitCycle(env, {
   const activeConfig=await getConfig(env);
   if(Number(activeConfig?.enabled)!==1) return {paused:true,admitted:0,quotes:0,exits:0};
   const admitted=await admitQuoteResearchEntries(env,activeConfig,now());
-  const limit=Math.max(0,Math.min(2,Math.floor(Number(maxQuotes)||0)));
+  const limit=Math.max(0,Math.min(4,Math.floor(Number(maxQuotes)||0)));
   if(!limit) return {admitted,quotes:0,exits:0,unavailable:0};
   const rows=await query(env,`SELECT * FROM paper_quote_research_positions
     WHERE status='RESEARCH_OPEN'

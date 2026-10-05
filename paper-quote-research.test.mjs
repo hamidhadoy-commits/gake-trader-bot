@@ -142,10 +142,10 @@ test('quote taking over 30 seconds is rejected and clock rollback is rejected',a
     }finally{h.close();}
   }
 });
-test('two-request cap and oldest-first selection rotate through queued positions',async()=>{
+test('default two-request budget and oldest-first selection rotate through queued positions',async()=>{
   const h=setup();try {
     await h.run();h.advance(1000);for(const sig of ['a','b','c','d'])h.add(sig);
-    h.deps.maxQuotes=99;assert.equal((await h.run()).quotes,2);h.advance(60000);
+    assert.equal((await h.run()).quotes,2);h.advance(60000);
     assert.equal((await h.run()).quotes,2);
     const rows=h.db.prepare('SELECT source_signature FROM paper_quote_research_observations ORDER BY id').all();
     assert.deepEqual(rows.map(x=>x.source_signature),['a','b','c','d']);
@@ -201,5 +201,30 @@ test('partial size quote rather than proportional full quote determines booked p
     };
     await h.run();const e=h.db.prepare('SELECT * FROM paper_quote_research_exits').get();
     assert.equal(e.quoted_out_lamports,10000000);assert.equal(e.modeled_net_lamports,6500000);
+  }finally{h.close();}
+});
+
+
+test('explicit capacity is capped at four and rotates without starving older positions',async()=>{
+  const h=setup();try {
+    await h.run();h.advance(1000);for(const sig of ['a','b','c','d','e','f','g','h'])h.add(sig);
+    h.deps.maxQuotes=99;assert.equal((await h.run()).quotes,4);h.advance(60000);
+    assert.equal((await h.run()).quotes,4);
+    const rows=h.db.prepare('SELECT source_signature FROM paper_quote_research_observations ORDER BY id').all();
+    assert.deepEqual(rows.map(x=>x.source_signature),['a','b','c','d','e','f','g','h']);
+  }finally{h.close();}
+});
+
+test('four-request capacity includes exact partial quotes in the same budget',async()=>{
+  const h=setup();try {
+    await h.run();h.advance(1000);for(const sig of ['a','b','c','d'])h.add(sig);
+    h.deps.maxQuotes=4;h.mark(0.000075);
+    const result=await h.run();assert.equal(result.quotes,4);assert.equal(result.exits,2);
+    assert.equal(h.position('a').remaining_raw_amount,'700000000');
+    assert.equal(h.position('b').remaining_raw_amount,'700000000');
+    assert.equal(h.position('c').take_profit_hit,0);
+    assert.equal(h.position('d').take_profit_hit,0);
+    h.advance(60000);await h.run();
+    assert.equal(h.position('c').take_profit_hit,1);assert.equal(h.position('d').take_profit_hit,1);
   }finally{h.close();}
 });

@@ -4161,7 +4161,7 @@ export default {
       await runQuoteResearchExitCycle(env, {
         getConfig: getPaperCopyConfig,
         sellQuote: fetchJupiterExecutableSellQuote,
-        maxQuotes: 2,
+        maxQuotes: 4,
       });
     } catch (error) {
       console.error({message: "QUOTE RESEARCH EXIT CYCLE ERROR",
@@ -4202,7 +4202,7 @@ export default {
         paperResearchMaxQuotesPerTick: 2,
         legacyRouteObservers: "PAUSED_RESOURCE_BUDGET",
         paperQuoteResearchExitCycle: "EXACT_REMAINING_QUOTE_TRIGGER",
-        paperQuoteResearchMaxQuotesPerTick: 2,
+        paperQuoteResearchMaxQuotesPerTick: 4,
         paperResearchCashAccount: "NONE_RESEARCH_IS_NOT_PORTFOLIO_PNL",
         paperCopyRiskGuard: "D1_BATCH_TRANSACTIONAL",
         paperExitEngine: "SL_TP_PARTIAL_TSL",
