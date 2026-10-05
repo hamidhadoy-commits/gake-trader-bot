@@ -35,7 +35,7 @@ test("concurrent starts remain 1100ms apart", async () => {
   await h.flush(); assert.deepEqual(h.starts, [10000]);
   await h.advance(); assert.deepEqual(h.starts, [10000, 11100]);
   await h.advance(); assert.deepEqual(h.starts, [10000, 11100, 12200]);
-  h.responses.forEach(x => x.resolve({ ok: true })); await Promise.all(ps);
+  h.responses.forEach(x => x.resolve(Response.json({ ok: true }))); await Promise.all(ps);
 });
 test("slow responses do not block later request starts", async () => {
   const h = await setup();
@@ -43,8 +43,8 @@ test("slow responses do not block later request starts", async () => {
   const p2 = h.m.fetchJupiterWithPacing("mock:2", "test");
   await h.flush(); await h.advance();
   assert.equal(h.responses.length, 2);
-  h.responses[1].resolve({ ok: true }); await p2;
-  h.responses[0].resolve({ ok: true }); await p1;
+  h.responses[1].resolve(Response.json({ ok: true })); await p2;
+  h.responses[0].resolve(Response.json({ ok: true })); await p1;
 });
 test("failed request does not leave queue locked", async () => {
   const h = await setup();
@@ -54,6 +54,6 @@ test("failed request does not leave queue locked", async () => {
   const p2 = h.m.fetchJupiterWithPacing("mock:2", "test");
   await h.flush(); await h.advance();
   assert.deepEqual(h.starts, [10000, 11100]);
-  h.responses[1].resolve({ ok: true }); await p2;
+  h.responses[1].resolve(Response.json({ ok: true })); await p2;
 });
 

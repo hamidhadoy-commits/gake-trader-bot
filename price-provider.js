@@ -56,13 +56,33 @@ async function fetchWithTimeout(
   timeoutMs = PRICE_FETCH_TIMEOUT_MS
 ) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timeoutId;
+  const deadline = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = new Error("Price request exceeded its response deadline");
+      error.name = "TimeoutError";
+      reject(error);
+      controller.abort();
+    }, timeoutMs);
+  });
 
   try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal,
+        });
+        // The deadline covers the body too: headers alone are not a usable quote.
+        const body = await response.arrayBuffer();
+        return new Response([204, 205, 304].includes(response.status) ? null : body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      })(),
+      deadline,
+    ]);
   } finally {
     clearTimeout(timeoutId);
   }
