@@ -1,3 +1,4 @@
+import { buildDirectPumpCandidate, validateDirectPumpCandidate } from "./direct-pump-buy.js";
 import {
   fetchPaperExitSolPrices,
   fetchJupiterExecutableBuyQuote,
@@ -488,7 +489,9 @@ function buildOKXSwapCandidate(tx) {
 function buildSwapCandidate(tx) {
   const okxCandidate = buildOKXSwapCandidate(tx);
   if (okxCandidate) return okxCandidate;
-  return buildRoutedGakeCandidate(tx);
+  const routedCandidate = buildRoutedGakeCandidate(tx);
+  if (routedCandidate) return routedCandidate;
+  return buildDirectPumpCandidate(tx, { wallet: GAKE_WALLET, wrappedSolMint: WRAPPED_SOL_MINT });
 }
 
 function validateCandidate(candidate) {
@@ -501,6 +504,10 @@ function validateCandidate(candidate) {
 
   if (candidate.transactionError !== null && candidate.transactionError !== undefined) {
     reasons.push("transaction_error");
+  }
+
+  if (candidate.detector === "DIRECT_PUMP_AMM_WSOL") {
+    return validateDirectPumpCandidate(candidate, GAKE_WALLET);
   }
 
   if (candidate.detector === "ROUTED_WSOL_GAKE_RECEIPT") {
@@ -3399,7 +3406,7 @@ async function handleWebhook(request, env) {
           type: tx?.type || null,
           source: tx?.source || null,
           reason:
-            "No exact OKX 0.001 SOL match and no complete routed WSOL -> token -> Gake economic chain",
+            "No exact OKX match, routed WSOL economic chain, or fresh direct Pump AMM buy",
         });
         continue;
       }
@@ -4189,6 +4196,7 @@ export default {
         webhookModeExpected: "ANY",
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
+        directPumpBuyDetector: "FRESH_EXACT_INSTRUCTION_AND_POOL_BALANCES",
         paperResearchExitCycle: "INDEPENDENT_QUOTED_POSITIONS",
         paperResearchMaxMarksPerTick: 2,
         paperResearchMaxQuotesPerTick: 2,
