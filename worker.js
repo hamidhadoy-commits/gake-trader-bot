@@ -4148,70 +4148,8 @@ export default {
       scheduledTime: controller?.scheduledTime || null,
     });
 
-        try {
-      await runOnePaperEntryRouteObservation(env);
-    } catch (error) {
-      console.error({
-        message: "❌ ENTRY ROUTE OBSERVATION ERROR",
-        error: String(error),
-        behavior:
-          "observation_failed_exit_engine_already_completed",
-        execution: "DISABLED",
-        realMoney: false,
-      });
-    }
-
-        try {
-      await runPaperSourceRouteObservationBatch(env, 4);
-    } catch (error) {
-      console.error({
-        message: "❌ SOURCE ROUTE OBSERVATION ERROR",
-        error: String(error),
-        behavior:
-          "observation_failed_exit_engine_already_completed",
-        execution: "DISABLED",
-        realMoney: false,
-      });
-    }
-    try {
-      await runPaperSourceRoutePersistenceBatch(env, 4);
-    } catch (error) {
-      console.error({
-        message: "❌ ROUTE PERSISTENCE OBSERVATION ERROR",
-        error: String(error),
-        behavior:
-          "observation_failed_exit_engine_already_completed",
-        execution: "DISABLED",
-        realMoney: false,
-      });
-    }
-    try {
-      await runExactEntryExitObservationBatch(env, {
-        getConfig: getPaperCopyConfig,
-        sellQuote: fetchJupiterExecutableSellQuote,
-        databaseOperation: runDatabaseOperation,
-        limit: 4,
-      });
-    } catch (error) {
-      console.error({
-        message: "EXACT ENTRY EXIT OBSERVATION ERROR",
-        error: String(error), execution: "DISABLED", realMoney: false,
-      });
-    }
-    try {
-      await runResearchExitCycle(env, {
-        getConfig: getPaperCopyConfig,
-        priceFeed: fetchPaperExitSolPrices,
-        sellQuote: fetchJupiterExecutableSellQuote,
-        maxMarks: 8,
-        maxQuotes: 4,
-      });
-    } catch (error) {
-      console.error({
-        message: "RESEARCH EXIT CYCLE ERROR",
-        error: String(error), execution: "DISABLED", realMoney: false,
-      });
-    }
+    // The legacy route/exact-window observers are paused to keep each free-tier
+    // cron invocation bounded. Primary paper exits above still run every minute.
     try {
       await runQuoteResearchExitCycle(env, {
         getConfig: getPaperCopyConfig,
@@ -4219,10 +4157,20 @@ export default {
         maxQuotes: 2,
       });
     } catch (error) {
-      console.error({
-        message: "QUOTE RESEARCH EXIT CYCLE ERROR",
-        error: String(error), execution: "DISABLED", realMoney: false,
+      console.error({message: "QUOTE RESEARCH EXIT CYCLE ERROR",
+        error: String(error), execution: "DISABLED", realMoney: false});
+    }
+    try {
+      await runResearchExitCycle(env, {
+        getConfig: getPaperCopyConfig,
+        priceFeed: fetchPaperExitSolPrices,
+        sellQuote: fetchJupiterExecutableSellQuote,
+        maxMarks: 2,
+        maxQuotes: 2,
       });
+    } catch (error) {
+      console.error({message: "RESEARCH EXIT CYCLE ERROR",
+        error: String(error), execution: "DISABLED", realMoney: false});
     }
     },
   async fetch(request, env, ctx) {
@@ -4242,6 +4190,9 @@ export default {
         databaseBinding: env?.DB ? "BOUND" : "MISSING",
         paperCopyAccounting: "ENABLED",
         paperResearchExitCycle: "INDEPENDENT_QUOTED_POSITIONS",
+        paperResearchMaxMarksPerTick: 2,
+        paperResearchMaxQuotesPerTick: 2,
+        legacyRouteObservers: "PAUSED_RESOURCE_BUDGET",
         paperQuoteResearchExitCycle: "EXACT_REMAINING_QUOTE_TRIGGER",
         paperQuoteResearchMaxQuotesPerTick: 2,
         paperResearchCashAccount: "NONE_RESEARCH_IS_NOT_PORTFOLIO_PNL",
