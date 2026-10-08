@@ -13,3 +13,14 @@ crons = [ "* * * * *" ]
 [observability]
 enabled = true
 head_sampling_rate = 1
+
+[[queues.producers]]
+binding = "PAPER_CRON_QUEUE"
+queue = "gake-paper-cron-free"
+
+[[queues.consumers]]
+queue = "gake-paper-cron-free"
+max_batch_size = 1
+max_batch_timeout = 1
+max_retries = 0
+max_concurrency = 1

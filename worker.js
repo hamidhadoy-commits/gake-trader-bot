@@ -1,3 +1,4 @@
+import { withPaperCronQueue } from "./paper-cron-queue.js";
 import { buildDirectPumpCandidate, validateDirectPumpCandidate } from "./direct-pump-buy.js";
 import {
   fetchPaperExitSolPrices,
@@ -4136,7 +4137,7 @@ async function runPaperSourceRoutePersistenceBatch(
     requested: due.length,
   };
 }
-export default {
+const paperWorker = {
   async scheduled(controller, env, ctx) {
     if (!env?.DB) {
       console.error({
@@ -4355,3 +4356,5 @@ return jsonResponse(
     return jsonResponse({ ok: false, error: "method_not_allowed" }, 405);
   },
 };
+
+export default withPaperCronQueue(paperWorker);
