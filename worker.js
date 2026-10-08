@@ -4149,37 +4149,63 @@ export default {
         new Error("env.DB is missing")
       );
     }
-    await runPaperExitTick(env, {
+    async function observePhase(phase, run) {
+      const startedMs = Date.now();
+      let completed = false;
+      console.log({
+        message: "SCHEDULED PHASE START",
+        phase,
+        cron: controller?.cron || null,
+        scheduledTime: controller?.scheduledTime || null,
+        execution: "DISABLED",
+        realMoney: false,
+      });
+      try {
+        const result = await run();
+        completed = true;
+        return result;
+      } finally {
+        console.log({
+          message: "SCHEDULED PHASE END",
+          phase,
+          completed,
+          elapsedWallMs: Date.now() - startedMs,
+          scheduledTime: controller?.scheduledTime || null,
+          execution: "DISABLED",
+          realMoney: false,
+        });
+      }
+    }
+    await observePhase("PAPER_EXIT", () => runPaperExitTick(env, {
       type: "CRON",
       cron: controller?.cron || null,
       scheduledTime: controller?.scheduledTime || null,
-    });
+    }));
 
-    // The legacy route/exact-window observers are paused to keep each free-tier
-    // cron invocation bounded. Primary paper exits above still run every minute.
+    // Preserve phase order, quote budgets, and existing failure behavior.
     try {
-      await runQuoteResearchExitCycle(env, {
+      await observePhase("QUOTE_RESEARCH", () => runQuoteResearchExitCycle(env, {
         getConfig: getPaperCopyConfig,
         sellQuote: fetchJupiterExecutableSellQuote,
         maxQuotes: 4,
-      });
+      }));
     } catch (error) {
       console.error({message: "QUOTE RESEARCH EXIT CYCLE ERROR",
         error: String(error), execution: "DISABLED", realMoney: false});
     }
     try {
-      await runResearchExitCycle(env, {
+      await observePhase("MARK_RESEARCH", () => runResearchExitCycle(env, {
         getConfig: getPaperCopyConfig,
         priceFeed: fetchPaperExitSolPrices,
         sellQuote: fetchJupiterExecutableSellQuote,
         maxMarks: 2,
         maxQuotes: 2,
-      });
+      }));
     } catch (error) {
       console.error({message: "RESEARCH EXIT CYCLE ERROR",
         error: String(error), execution: "DISABLED", realMoney: false});
     }
-    },
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 

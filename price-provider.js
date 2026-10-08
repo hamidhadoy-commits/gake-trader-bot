@@ -44,7 +44,6 @@ const TOKEN_DECIMALS_CACHE_MAX_ENTRIES = 256;
 const tokenDecimalsCache = new Map();
 
 let lastJupiterRequestStartedAt = 0;
-let jupiterRequestStartQueue = Promise.resolve();
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,12 +73,18 @@ async function fetchWithTimeout(
           signal: controller.signal,
         });
         // The deadline covers the body too: headers alone are not a usable quote.
-        const body = await response.arrayBuffer();
-        return new Response([204, 205, 304].includes(response.status) ? null : body, {
+        const body = await response.text();
+        // Keep the completed body without rebuilding a native Response and
+        // decoding it again. Only these response fields/readers are consumed
+        // by the private price transport; the same deadline still covers I/O.
+        return {
           status: response.status,
           statusText: response.statusText,
           headers: response.headers,
-        });
+          ok: response.ok,
+          async text() { return body; },
+          async json() { return JSON.parse(body); },
+        };
       })(),
       deadline,
     ]);
@@ -89,25 +94,20 @@ async function fetchWithTimeout(
 }
 
 async function fetchJupiterWithPacing(url, jupiterApiKey) {
-  let releaseStart;
-  const previousStart = jupiterRequestStartQueue;
-  jupiterRequestStartQueue = new Promise((resolve) => {
-    releaseStart = resolve;
-  });
-  await previousStart;
-  try {
+  // Keep only the last start time across invocations. An interrupted pacing
+  // sleep must not leave later invocations awaiting a shared Promise forever.
+  while (true) {
     const now = Date.now();
     const waitMs = Math.max(
       0,
       JUPITER_MIN_REQUEST_SPACING_MS - (now - lastJupiterRequestStartedAt)
     );
-
     if (waitMs > 0) {
       await sleep(waitMs);
+      // Concurrent or late timer wakes must recheck the shared start time.
+      continue;
     }
-
-    lastJupiterRequestStartedAt = Date.now();
-
+    lastJupiterRequestStartedAt = now;
     return fetchWithTimeout(url, {
       method: "GET",
       headers: {
@@ -115,9 +115,6 @@ async function fetchJupiterWithPacing(url, jupiterApiKey) {
         "x-api-key": jupiterApiKey,
       },
     });
-  } finally {
-    // Release after starting fetch; response time must not hold the queue.
-    releaseStart();
   }
 }
 
