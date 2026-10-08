@@ -12,7 +12,7 @@ async function setup() {
     /function sleep\(ms\) \{[\s\S]*?\n\}/,
     "function sleep(ms) { return globalThis.__pacingSleep(ms); }"
   ) + "\nexport { fetchJupiterWithPacing };\n// run " + (++run);
-  globalThis.__pacingSleep = ms => new Promise(resolve => waiting.push({ ms, resolve }));
+  globalThis.__pacingSleep = ms => new Promise(resolve => waiting.push({ ms, due: clock + ms, resolve }));
   Date.now = () => clock;
   globalThis.fetch = () => {
     starts.push(clock);
@@ -20,9 +20,13 @@ async function setup() {
   };
   const m = await import("data:text/javascript;base64," + Buffer.from(source).toString("base64"));
   const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-  const advance = async () => {
-    assert.equal(waiting.length, 1);
-    const next = waiting.shift(); clock += next.ms; next.resolve(); await flush();
+  const advance = async (lateBy = 0) => {
+    assert.ok(waiting.length > 0, "expected a pending pacing timer");
+    clock = Math.min(...waiting.map(timer => timer.due)) + lateBy;
+    const due = waiting.filter(timer => timer.due <= clock);
+    for (const timer of due) waiting.splice(waiting.indexOf(timer), 1);
+    due.forEach(timer => timer.resolve());
+    await flush();
   };
   return { m, starts, responses, waiting, flush, advance };
 }
@@ -57,3 +61,16 @@ test("failed request does not leave queue locked", async () => {
   h.responses[1].resolve(Response.json({ ok: true })); await p2;
 });
 
+
+test("simultaneous late timer wakes recheck the last start time", async () => {
+  const h = await setup();
+  const ps = [1, 2, 3].map(i => h.m.fetchJupiterWithPacing("mock:" + i, "test"));
+  await h.flush();
+  assert.deepEqual(h.starts, [10000]);
+  await h.advance(500);
+  assert.deepEqual(h.starts, [10000, 11600]);
+  await h.advance();
+  assert.deepEqual(h.starts, [10000, 11600, 12700]);
+  h.responses.forEach(x => x.resolve(Response.json({ ok: true })));
+  await Promise.all(ps);
+});
