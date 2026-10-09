@@ -4226,7 +4226,7 @@ const paperWorker = {
         paperCopyAccounting: "ENABLED",
         directPumpBuyDetector: "FRESH_EXACT_INSTRUCTION_AND_POOL_BALANCES",
         paperResearchExitCycle: "INDEPENDENT_QUOTED_POSITIONS",
-        paperResearchMaxMarksPerTick: 2,
+        paperResearchMaxMarksPerTick: 4,
         paperResearchMaxQuotesPerTick: 2,
         legacyRouteObservers: "PAUSED_RESOURCE_BUDGET",
         paperQuoteResearchExitCycle: "EXACT_REMAINING_QUOTE_TRIGGER",
