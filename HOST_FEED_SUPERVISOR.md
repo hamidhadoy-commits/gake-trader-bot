@@ -11,3 +11,4 @@ No Windows service, Task Scheduler entry, startup registration, system setting, 
 
 Stop by checking supervisor-process.json PID identity, then terminate that supervisor and its current child from supervisor.json. Windows force termination can leave lock files; both locks remain fail-closed until their recorded PIDs are gone. Roll back by stopping both processes, then run the original publisher using its saved args.
 Tests use local fixture children without provider calls: restart after nonzero exit, duplicate supervisor rejection, stop/lock cleanup, bounded crash-loop termination and suppression of stderr content. Existing host feed tests verify freshness and unchanged fallbacks.
+\nRepeated launch while the supervisor lock PID is alive returns supervisorAlreadyRunning without replacing config or process metadata. Invalid lock content fails closed. This is a manual launcher; it does not install startup tasks or survive a computer shutdown automatically.

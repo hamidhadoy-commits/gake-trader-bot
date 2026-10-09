@@ -1,6 +1,12 @@
 import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
 const i=process.argv.indexOf('--state-dir');if(i<0)throw Error('STATE_DIR_REQUIRED');
-const dir=path.resolve(process.argv[i+1]),record=JSON.parse(fs.readFileSync(path.join(dir,'publisher-process.json'),'utf8'));
+const dir=path.resolve(process.argv[i+1]),lock=path.join(dir,'supervisor.json.lock');
+if(fs.existsSync(lock)){
+  const pid=Number(fs.readFileSync(lock,'utf8'));if(!Number.isSafeInteger(pid)||pid<=0)throw Error('INVALID_SUPERVISOR_LOCK');
+  let alive=true;try{process.kill(pid,0);}catch(e){if(e.code!=='ESRCH')throw e;alive=false;}
+  if(alive){console.log(JSON.stringify({supervisorAlreadyRunning:true,supervisorPid:pid}));process.exit(0);}
+}
+const record=JSON.parse(fs.readFileSync(path.join(dir,'publisher-process.json'),'utf8'));
 const publisher=path.resolve(record.args[0]),cwd=path.dirname(publisher);
 if(path.basename(publisher)!=='host-reference-publisher.mjs')throw Error('UNEXPECTED_PUBLISHER');
 try{process.kill(record.pid,0);throw Error('EXISTING_PUBLISHER_ACTIVE');}catch(e){if(e.code!=='ESRCH')throw e;}
