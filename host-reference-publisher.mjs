@@ -45,12 +45,12 @@ async function tick(){
  const payload={schemaVersion:1,provider:'GECKOTERMINAL_PUBLIC',wrappedSolMint:SOL,tokenPrices,responseMetadata};
  const observedAt=new Date(end).toISOString();
  const write=await query('INSERT INTO paper_reference_price_feed(id,observed_at,payload_json) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,payload_json=excluded.payload_json WHERE excluded.observed_at>paper_reference_price_feed.observed_at',[observedAt,JSON.stringify(payload)]);
- state.successes++;state.last={observedAt,mints:mints.length,priced:mints.filter(x=>tokenPrices[x]>0).length,changes:write.meta?.changes,rowsWritten:write.meta?.rows_written};
+ state.successes++;state.last={observedAt,responseMetadata,mints:mints.length,priced:mints.filter(x=>tokenPrices[x]>0).length,changes:write.meta?.changes,rowsWritten:write.meta?.rows_written};
 }
 try{
  do{
   const start=Date.now();try{await tick()}catch(e){state.failures++;state.lastError={at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(e.message)?e.message:'REQUEST_OR_IO_FAILED'}}save();
   if(args.includes('--once')||stopping)break;
-  await new Promise(r=>setTimeout(r,Math.max(1000,60000-(Date.now()-start))));
+  await new Promise(r=>setTimeout(r,Math.max(1000,30000-(Date.now()-start))));
  }while(!stopping);
 }finally{try{if(Number(fs.readFileSync(lock,'utf8'))===process.pid)fs.unlinkSync(lock)}catch{}}
