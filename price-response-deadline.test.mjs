@@ -55,7 +55,7 @@ test('a stalled CoinGecko body permits the existing DEX fallback',async()=>{
   };
   const prices=await provider.fetchPaperExitSolPrices(['A'],{coingeckoApiKey:'test'});
   assert.equal(prices.get('A').priceSOLPerToken,0.02);
-  assert.equal(calls.length,2);
+  assert.equal(calls.length,3);
 });
 
 test('empty HTTP 204 response remains valid',async()=>{

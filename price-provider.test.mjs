@@ -22,6 +22,7 @@ async function check(mints, options, mock, verify) {
       const request = String(url);
       calls.push(request);
       assert.ok(!request.includes("/swap/"), "Mark pricing must not call swap APIs");
+      if (request.includes("geckoterminal")) return coinGecko({});
       return mock(request, calls);
     };
     const encoded = Buffer.from(source + "\n// case " + (++moduleId)).toString("base64");
@@ -53,7 +54,7 @@ test("Fallbacks request only missing mints and preserve primary prices", async (
       assert.deepEqual(url.split("/").at(-1).split(","), ["C", "D"]);
       return Response.json([pair("C"), pair("D", -1), pair("D", 1, "USDC")]);
     }, (p, c, logs) => {
-      assert.equal(p.size, 3); assert.equal(c.length, 3);
+      assert.equal(p.size, 3); assert.equal(c.length, 4);
       assert.equal(p.get("A").priceSOLPerToken, 0.02);
       assert.equal(p.get("B").priceSOLPerToken, 0.03);
       assert.equal(p.get("C").priceSOLPerToken, 0.04);
@@ -75,15 +76,15 @@ test("CoinGecko 429 permits the next provider without throwing", async () => {
   await check(["A"], { coingeckoApiKey: "mock" },
     (u) => u.includes("coingecko") ? new Response("limited", { status: 429 })
       : Response.json([pair("A")]),
-    (p, c) => { assert.equal(p.size, 1); assert.equal(c.length, 2); });
+    (p, c) => { assert.equal(p.size, 1); assert.equal(c.length, 3); });
 });
 
 test("DEX 429 stops later batches and keeps already collected prices", async () => {
   const mints = Array.from({ length: 61 }, (_, i) => "M" + i);
-  await check(mints, {}, (_, calls) => calls.length === 1
+  await check(mints, {}, (_, calls) => calls.filter(u => u.includes("dexscreener")).length === 1
     ? Response.json(mints.slice(0, 30).map((m) => pair(m)))
     : new Response("limited", { status: 429 }),
-    (p, c) => { assert.equal(p.size, 30); assert.equal(c.length, 2); });
+    (p, c) => { assert.equal(p.size, 30); assert.equal(c.length, 5); });
 });
 
 test("Invalid primary JSON permits fallback", async () => {
@@ -94,7 +95,7 @@ test("Invalid primary JSON permits fallback", async () => {
 
 test("Unavailable prices remain absent", async () => {
   await check(["A"], {}, () => Response.json([]),
-    (p, c) => { assert.equal(p.size, 0); assert.equal(c.length, 1); });
+    (p, c) => { assert.equal(p.size, 0); assert.equal(c.length, 2); });
 });
 
 test("Empty input does not make HTTP requests", async () => {
@@ -105,7 +106,7 @@ test("Empty input does not make HTTP requests", async () => {
 
 test("A network failure retries DEX once and safely leaves prices absent", async () => {
   await check(["A"], {}, () => { throw new Error("Mock network failure"); },
-    (p, c) => { assert.equal(p.size, 0); assert.equal(c.length, 2); });
+    (p, c) => { assert.equal(p.size, 0); assert.equal(c.length, 3); });
 });
 
 test("Jupiter HTTP failures still allow DEX fallback", async () => {

@@ -36,6 +36,31 @@ const JUPITER_MAX_TARGET_MINTS_PER_REQUEST = 49;
 const JUPITER_TOKENS_MAX_MINTS_PER_REQUEST = 100;
 const DEXSCREENER_MAX_TOKENS_PER_REQUEST = 30;
 const COINGECKO_MAX_TARGET_MINTS_PER_REQUEST = 29;
+const GECKOTERMINAL_PRICE_URL_PREFIX =
+  "https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/";
+// Isolate-local suppression: no extra D1 writes, and no waiting inside a job.
+const markProviderBlockedUntil = new Map();
+function markRetryAfterMs(response, now) {
+  const value = response.headers?.get?.("retry-after")?.trim();
+  if (!value) return 0;
+  const delay = /^\d+(?:\.\d+)?$/.test(value)
+    ? Number(value) * 1000 : Date.parse(value) - now;
+  return Number.isFinite(delay) && delay > 0
+    && Number.isSafeInteger(Math.ceil(now + delay)) ? Math.ceil(delay) : 0;
+}
+async function markLimitDetails(response) {
+  // Emit fixed categories only. Never log the provider body, URL or API key.
+  let body = "";
+  try { body = (await response.text()).slice(0, 4096).toLowerCase(); } catch {}
+  const reason = /monthly|credit limit|credits.*exhaust|quota.*exceed/.test(body)
+    ? "monthly_credit_limit" : /rate limit|too many requests/.test(body)
+      ? "request_rate_limit" : "unclassified_429";
+  const now = Date.now();
+  const retryAfterMs = markRetryAfterMs(response, now);
+  return { reason, retryAfterMs,
+    cooldownMs: Math.max(reason === "monthly_credit_limit" ? 3600000 : 60000,
+      retryAfterMs) };
+}
 const PRICE_FETCH_TIMEOUT_MS = 7000;
 const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
@@ -569,14 +594,18 @@ async function fetchJupiterSwapQuoteSolPrices(
 async function fetchCoinGeckoMarkSolPrices(
   mints,
   wrappedSolMint,
-  coingeckoApiKey
+  coingeckoApiKey,
+  publicGecko = false
 ) {
+  const provider = publicGecko ? "GECKOTERMINAL" : "COINGECKO";
   const uniqueMints = [...new Set((mints || []).filter(Boolean))];
   const prices = new Map();
 
-  if (!coingeckoApiKey) {
+  if (!uniqueMints.length || Date.now() < (markProviderBlockedUntil.get(provider) || 0)) return prices;
+
+  if (!publicGecko && !coingeckoApiKey) {
     console.warn({
-      message: "⚠️ COINGECKO MARK PRICE ERROR",
+      message: `⚠️ ${provider} MARK PRICE ERROR`,
       reason: "missing_api_key",
       behavior: "positions_without_mark_price_will_be_skipped",
     });
@@ -600,7 +629,7 @@ async function fetchCoinGeckoMarkSolPrices(
     ];
 
     const url =
-      COINGECKO_ONCHAIN_PRICE_URL_PREFIX +
+      (publicGecko ? GECKOTERMINAL_PRICE_URL_PREFIX : COINGECKO_ONCHAIN_PRICE_URL_PREFIX) +
       addresses
         .map((address) => encodeURIComponent(address))
         .join(",");
@@ -612,13 +641,13 @@ async function fetchCoinGeckoMarkSolPrices(
       response = await fetchWithTimeout(url, {
         method: "GET",
         headers: {
-          accept: "application/json",
-          "x-cg-demo-api-key": coingeckoApiKey,
+          accept: publicGecko ? "application/json;version=20230302" : "application/json",
+          ...(publicGecko ? {} : { "x-cg-demo-api-key": coingeckoApiKey }),
         },
       });
     } catch (error) {
       console.warn({
-        message: "⚠️ COINGECKO MARK PRICE ERROR",
+        message: `⚠️ ${provider} MARK PRICE ERROR`,
         reason: "network_or_timeout",
         error: String(error),
       });
@@ -628,9 +657,12 @@ async function fetchCoinGeckoMarkSolPrices(
     const responseMetadata = capturePriceResponseMetadata(response, requestStartedAtMs, Date.now());
 
     if (response.status === 429) {
+      const details = await markLimitDetails(response);
+      markProviderBlockedUntil.set(provider, Date.now() + details.cooldownMs);
       console.warn({
-        message: "⚠️ COINGECKO MARK PRICE RATE LIMITED",
+        message: `⚠️ ${provider} MARK PRICE RATE LIMITED`,
         status: response.status,
+        ...details,
         behavior:
           "positions_without_mark_price_will_be_skipped",
       });
@@ -638,19 +670,11 @@ async function fetchCoinGeckoMarkSolPrices(
     }
 
     if (!response.ok) {
-      let responseBody = null;
-
-      try {
-        responseBody = await response.text();
-      } catch (bodyError) {
-        responseBody = `UNREADABLE_BODY: ${String(bodyError)}`;
-      }
-
       console.warn({
-        message: "⚠️ COINGECKO MARK PRICE ERROR",
+        message: `⚠️ ${provider} MARK PRICE ERROR`,
         reason: "http_error",
         status: response.status,
-        responseBody,
+        // No raw provider body: it can contain credential/account details.
       });
       continue;
     }
@@ -669,7 +693,7 @@ async function fetchCoinGeckoMarkSolPrices(
         solUsdPrice <= 0
       ) {
         console.warn({
-          message: "⚠️ COINGECKO MARK PRICE ERROR",
+          message: `⚠️ ${provider} MARK PRICE ERROR`,
           reason: "missing_wsol_price",
         });
         continue;
@@ -699,9 +723,9 @@ async function fetchCoinGeckoMarkSolPrices(
           priceSOLPerToken,
           liquidityUSD: 0,
           pairAddress: null,
-          dexId: "COINGECKO_ONCHAIN",
+          dexId: publicGecko ? "GECKOTERMINAL_ONCHAIN" : "COINGECKO_ONCHAIN",
           url: null,
-          source: "COINGECKO_MARK_USD_RATIO",
+          source: publicGecko ? "GECKOTERMINAL_MARK_USD_RATIO" : "COINGECKO_MARK_USD_RATIO",
           tokenUsdPrice,
           solUsdPrice,
           responseMetadata,
@@ -709,7 +733,7 @@ async function fetchCoinGeckoMarkSolPrices(
       }
     } catch (error) {
       console.warn({
-        message: "⚠️ COINGECKO MARK PRICE ERROR",
+        message: `⚠️ ${provider} MARK PRICE ERROR`,
         reason: "invalid_json",
         error: String(error),
       });
@@ -1499,6 +1523,10 @@ export async function fetchPaperExitSolPrices(
     return added;
   }
 
+  const geckoTerminalPriced = await addMissingPrices(
+    "GECKOTERMINAL", (missing) =>
+      fetchCoinGeckoMarkSolPrices(missing, wrappedSolMint, null, true)
+  );
   const jupiterPriced = jupiterApiKey
     ? await addMissingPrices("JUPITER_PRICE_V3", (missing) =>
         fetchJupiterSolPrices(missing, wrappedSolMint, jupiterApiKey)
@@ -1514,11 +1542,12 @@ export async function fetchPaperExitSolPrices(
       "💹 PAPER MARK PRICE PROVIDER",
     requested: uniqueMints.length,
     coinGeckoPriced,
+    geckoTerminalPriced,
     jupiterPriced,
     dexScreenerPriced,
     missing: missingMints().length,
     source:
-      "COINGECKO_THEN_JUPITER_PRICE_THEN_DEXSCREENER",
+      "COINGECKO_THEN_GECKOTERMINAL_THEN_JUPITER_PRICE_THEN_DEXSCREENER",
     execution: "DISABLED",
     realMoney: false,
   });
