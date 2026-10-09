@@ -4199,7 +4199,7 @@ const paperWorker = {
         getConfig: getPaperCopyConfig,
         priceFeed: fetchPaperExitSolPrices,
         sellQuote: fetchJupiterExecutableSellQuote,
-        maxMarks: 2,
+        maxMarks: 4,
         maxQuotes: 2,
       }));
     } catch (error) {
