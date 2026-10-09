@@ -1,0 +1,8 @@
+# CoinGecko rate-limit recovery
+After HTTP429, the existing Mark transport uses an isolate-local numeric cooldown shared by Main and Mark. Repeated failures use 60, 120, 240, then 300 seconds. Valid Retry-After seconds or HTTP dates up to one day extend this interval. Invalid/expired/unreasonable header values use the bounded fallback. No sleep or shared unresolved Promise is added.
+
+During cooldown the CoinGecko result is empty and the existing trusted host, Jupiter Price and DEX fallbacks continue in their original order. Successful HTTP clears the rate-limit state; at expiry CoinGecko is retried in its original primary position. Success prices, WSOL ratio, freshness checks, exit rules, executable Quote requirements and budgets stay unchanged. This is transport backoff, not a change to detector or risk semantics. Recovery can be delayed by the cooldown; process/isolate recycling resets it, so the interval is not a durable account-wide request limit.
+
+429 body and other CoinGecko HTTP error bodies are classified to fixed reason categories and a numeric code only. Raw body/key/message is not logged. A category is evidence about the body, not proof of billing-account status. This change cannot replenish provider credits or recover liquidity. Computer dependence of the existing host feed remains.
+
+Seven new tests cover Retry-After, safe classification, duplicate suppression with host fallback, exponential delay and reset, long server waits, stale-feed fallback and non-429 behavior. All 164 project tests passed before deployment. Rollback Worker version: fe0dcc5f-8112-4134-b34d-0d08b6aaa0e3. Keep the host supervisor running on rollback.

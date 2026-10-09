@@ -80,6 +80,43 @@ const JUPITER_MAX_TARGET_MINTS_PER_REQUEST = 49;
 const JUPITER_TOKENS_MAX_MINTS_PER_REQUEST = 100;
 const DEXSCREENER_MAX_TOKENS_PER_REQUEST = 30;
 const COINGECKO_MAX_TARGET_MINTS_PER_REQUEST = 29;
+const COINGECKO_COOLDOWN_BASE_MS = 60000;
+const COINGECKO_COOLDOWN_MAX_MS = 300000;
+let coinGeckoCooldownUntilMs = 0;
+let coinGeckoRateLimitFailures = 0;
+
+function coinGeckoRetryAfterMs(response, now) {
+  const raw = response?.headers?.get?.("retry-after");
+  if (typeof raw !== "string" || raw.length > 128) return 0;
+  const value = raw.trim();
+  const seconds = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+  const ms = Number.isFinite(seconds) ? Math.ceil(seconds * 1000) : Date.parse(value) - now;
+  return Number.isSafeInteger(ms) && ms > 0 && ms <= 86400000 ? ms : 0;
+}
+function classifyCoinGeckoError(body) {
+  let payload;
+  try { payload = JSON.parse(body); } catch { return { reason: "unclassified", errorCode: null }; }
+  const rawCode = payload?.status?.error_code ?? payload?.error?.code;
+  const errorCode = Number.isSafeInteger(rawCode) ? rawCode : null;
+  const message = [payload?.status?.error_message, payload?.error?.message,
+    typeof payload?.error === "string" ? payload.error : null]
+    .filter(x => typeof x === "string").join(" ").slice(0,4096).toLowerCase();
+  const reason = /month|monthly|credits|billing cycle/.test(message) ? "monthly_quota"
+    : /invalid.*key|key.*invalid|unauthorized/.test(message) ? "invalid_key"
+    : /pro.*subscriber|restricted.*endpoint/.test(message) ? "restricted_endpoint"
+    : /rate|too many requests|request limit/.test(message) ? "rate_limit" : "unclassified";
+  return { reason, errorCode };
+}
+function setCoinGeckoCooldown(response, now) {
+  coinGeckoRateLimitFailures = Math.min(coinGeckoRateLimitFailures + 1, 4);
+  const exponential = Math.min(COINGECKO_COOLDOWN_MAX_MS,
+    COINGECKO_COOLDOWN_BASE_MS * 2 ** (coinGeckoRateLimitFailures - 1));
+  const retryAfterMs = coinGeckoRetryAfterMs(response, now);
+  const cooldownMs = Math.max(exponential, retryAfterMs);
+  coinGeckoCooldownUntilMs = now + cooldownMs;
+  return { cooldownMs, retryAfterMs };
+}
+
 const PRICE_FETCH_TIMEOUT_MS = 7000;
 const JUPITER_MIN_REQUEST_SPACING_MS = 1100;
 const RETRY_DELAYS_MS = [1200];
@@ -627,6 +664,12 @@ async function fetchCoinGeckoMarkSolPrices(
     return prices;
   }
 
+  if (Date.now() < coinGeckoCooldownUntilMs) {
+    console.log({message: "COINGECKO MARK PRICE COOLDOWN",
+      remainingMs: coinGeckoCooldownUntilMs - Date.now()});
+    return prices;
+  }
+
   for (
     let offset = 0;
     offset < uniqueMints.length;
@@ -672,14 +715,14 @@ async function fetchCoinGeckoMarkSolPrices(
     const responseMetadata = capturePriceResponseMetadata(response, requestStartedAtMs, Date.now());
 
     if (response.status === 429) {
-      console.warn({
-        message: "⚠️ COINGECKO MARK PRICE RATE LIMITED",
-        status: response.status,
-        behavior:
-          "positions_without_mark_price_will_be_skipped",
-      });
+      const cooldown = setCoinGeckoCooldown(response, Date.now());
+      let errorInfo = {reason: "unclassified", errorCode: null};
+      try { errorInfo = classifyCoinGeckoError(await response.text()); } catch {}
+      console.warn({message: "COINGECKO MARK PRICE RATE LIMITED", status: 429,
+        ...cooldown, ...errorInfo, behavior: "continue_existing_fallbacks"});
       break;
     }
+    if (response.ok) { coinGeckoRateLimitFailures = 0; coinGeckoCooldownUntilMs = 0; }
 
     if (!response.ok) {
       let responseBody = null;
@@ -694,7 +737,7 @@ async function fetchCoinGeckoMarkSolPrices(
         message: "⚠️ COINGECKO MARK PRICE ERROR",
         reason: "http_error",
         status: response.status,
-        responseBody,
+        ...classifyCoinGeckoError(responseBody),
       });
       continue;
     }
