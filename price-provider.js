@@ -1,3 +1,47 @@
+// Trusted host publisher supplies public observations through the existing D1 binding.
+// Fresh transport timestamps are not a guarantee of fresh underlying market trades.
+export const HOST_REFERENCE_MAX_AGE_MS = 90000;
+const HOST_FEED_SOL = 'So11111111111111111111111111111111111111112';
+export function decodeHostReferenceFeed(row, mints, wrappedSolMint = HOST_FEED_SOL, now = Date.now()) {
+  const prices = new Map();
+  if (!row || typeof row.payload_json !== 'string' || row.payload_json.length > 65536) return prices;
+  let payload; try { payload = JSON.parse(row.payload_json); } catch { return prices; }
+  const metadata = payload?.responseMetadata;
+  const completed = Date.parse(row.observed_at), started = Date.parse(metadata?.requestStartedAt);
+  if (payload?.schemaVersion !== 1 || payload.provider !== 'GECKOTERMINAL_PUBLIC'
+      || payload.wrappedSolMint !== wrappedSolMint || metadata?.httpStatus !== 200
+      || !Number.isFinite(completed) || !Number.isFinite(started) || started > completed
+      || completed !== Date.parse(metadata?.responseReceivedAt)
+      || completed > now + 5000 || now - completed > HOST_REFERENCE_MAX_AGE_MS
+      || started > now + 5000 || now - started > HOST_REFERENCE_MAX_AGE_MS
+      || (metadata.responseAgeSeconds !== null && metadata.responseAgeSeconds !== undefined
+          && (!Number.isSafeInteger(metadata.responseAgeSeconds) || metadata.responseAgeSeconds < 0
+              || metadata.responseAgeSeconds * 1000 + now - completed > HOST_REFERENCE_MAX_AGE_MS))) return prices;
+  const tokenPrices = payload.tokenPrices;
+  const solUsdPrice = Number(tokenPrices?.[wrappedSolMint]);
+  if (!Number.isFinite(solUsdPrice) || solUsdPrice <= 0) return prices;
+  for (const mint of new Set((mints || []).filter(Boolean))) {
+    const tokenUsdPrice = Number(tokenPrices?.[mint]);
+    const priceSOLPerToken = tokenUsdPrice / solUsdPrice;
+    if (!Number.isFinite(tokenUsdPrice) || tokenUsdPrice <= 0
+        || !Number.isFinite(priceSOLPerToken) || priceSOLPerToken <= 0) continue;
+    prices.set(mint, { priceSOLPerToken, tokenUsdPrice, solUsdPrice,
+      source: 'GECKOTERMINAL_HOST_MARK_USD_RATIO', dexId: 'GECKOTERMINAL_ONCHAIN',
+      liquidityUSD: 0, pairAddress: null, url: null, responseMetadata: metadata });
+  }
+  return prices;
+}
+export async function fetchHostReferenceSolPrices(db, mints, wrappedSolMint) {
+  if (!db || !mints?.length) return new Map();
+  try {
+    const row = await db.prepare('SELECT observed_at,payload_json FROM paper_reference_price_feed WHERE id=1').first();
+    return decodeHostReferenceFeed(row, mints, wrappedSolMint);
+  } catch {
+    console.warn({message:'HOST REFERENCE PRICE UNAVAILABLE', reason:'feed_read_failed'});
+    return new Map();
+  }
+}
+
 // Transport metadata describes the response, not the age of its market price.
 export function capturePriceResponseMetadata(response, startedAtMs, completedAtMs) {
   const header = name => {
@@ -1441,6 +1485,7 @@ export async function fetchPaperExitSolPrices(
       DEFAULT_WRAPPED_SOL_MINT,
     coingeckoApiKey = null,
     jupiterApiKey = null,
+    referenceDb = null,
   } = {}
 ) {
   const uniqueMints = [
@@ -1499,6 +1544,9 @@ export async function fetchPaperExitSolPrices(
     return added;
   }
 
+  const hostReferencePriced = await addMissingPrices(
+    "GECKOTERMINAL_HOST", (missing) => fetchHostReferenceSolPrices(referenceDb, missing, wrappedSolMint)
+  );
   const jupiterPriced = jupiterApiKey
     ? await addMissingPrices("JUPITER_PRICE_V3", (missing) =>
         fetchJupiterSolPrices(missing, wrappedSolMint, jupiterApiKey)
@@ -1514,11 +1562,12 @@ export async function fetchPaperExitSolPrices(
       "💹 PAPER MARK PRICE PROVIDER",
     requested: uniqueMints.length,
     coinGeckoPriced,
+    hostReferencePriced,
     jupiterPriced,
     dexScreenerPriced,
     missing: missingMints().length,
     source:
-      "COINGECKO_THEN_JUPITER_PRICE_THEN_DEXSCREENER",
+      "COINGECKO_THEN_HOST_REFERENCE_THEN_JUPITER_PRICE_THEN_DEXSCREENER",
     execution: "DISABLED",
     realMoney: false,
   });

@@ -2791,6 +2791,7 @@ priceMap = await fetchPaperExitSolPrices(
     wrappedSolMint: WRAPPED_SOL_MINT,
     jupiterApiKey: env?.JUPITER_API_KEY || null,
     coingeckoApiKey: env?.COINGECKO_API_KEY || null,
+    referenceDb: env.DB,
     tokenAmountsByMint,
   }
 );
@@ -4197,7 +4198,7 @@ const paperWorker = {
     try {
       await observePhase("MARK_RESEARCH", () => runResearchExitCycle(env, {
         getConfig: getPaperCopyConfig,
-        priceFeed: fetchPaperExitSolPrices,
+        priceFeed: (mints,options) => fetchPaperExitSolPrices(mints,{...options,referenceDb:env.DB}),
         sellQuote: fetchJupiterExecutableSellQuote,
         maxMarks: 4,
         maxQuotes: 2,
