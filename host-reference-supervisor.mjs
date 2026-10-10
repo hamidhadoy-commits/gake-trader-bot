@@ -1,18 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+import {acquireLock} from './host-process-lock.mjs';
+import {TERMINAL_FEED_EXIT} from './host-retry-policy.mjs';
 export function startSupervisor(config) {
   const {publisher,publisherArgs=[],cwd,output}=config;
   if(!path.isAbsolute(publisher)||!path.isAbsolute(output)||!path.isAbsolute(cwd)) throw Error('ABSOLUTE_PATH_REQUIRED');
   const lock=output+'.lock';
-  if(fs.existsSync(lock)) {
-    const old=Number(fs.readFileSync(lock,'utf8'));
-    if(!Number.isSafeInteger(old)||old<=0)throw Error('INVALID_SUPERVISOR_LOCK');
-    try {process.kill(old,0);throw Error('SUPERVISOR_ALREADY_RUNNING');}
-    catch(e){if(e.code!=='ESRCH')throw e;fs.unlinkSync(lock);}
-  }
-  fs.writeFileSync(lock,String(process.pid),{flag:'wx'});
+  let releaseLock;
+  try{releaseLock=acquireLock(lock,{script:fileURLToPath(import.meta.url),output});}
+  catch(e){if(e.message==='PROJECT_PROCESS_ALREADY_RUNNING')throw Error('SUPERVISOR_ALREADY_RUNNING');throw e;}
   const state={startedAt:new Date().toISOString(),pid:process.pid,status:'STARTING',launches:0,restarts:0};
   let child,timer,stopping=false,finished=false;
   const minDelay=config.restartMs??5000,maxDelay=config.maxRestartMs??60000;
@@ -25,7 +23,7 @@ export function startSupervisor(config) {
   function finish(){
     if(finished)return;finished=true;clearInterval(heartbeat);clearTimeout(timer);
     state.status='STOPPED';state.stoppedAt=new Date().toISOString();
-    try{save();}finally{try{if(Number(fs.readFileSync(lock,'utf8'))===process.pid)fs.unlinkSync(lock);}catch{}resolveDone(state);}
+    try{save();}finally{releaseLock();resolveDone(state);}
   }
   function launch(){
     if(stopping)return finish();
@@ -38,7 +36,8 @@ export function startSupervisor(config) {
     child.once('close',(code,signal)=>{
       state.childPid=null;state.lastExit={at:new Date().toISOString(),code,signal};
       if(stopping)return finish();
-      if(state.restarts >= (config.maxRestarts??Infinity))return finish();
+      if(code===TERMINAL_FEED_EXIT){state.stopReason='PUBLISHER_RETRY_LIMIT';return finish();}
+      if(state.restarts >= (config.maxRestarts??2)){state.stopReason='SUPERVISOR_RETRY_LIMIT';return finish();}
       state.restarts++;state.status='RESTART_WAIT';
       const streak=Date.now()-started>=120000?0:Math.min((state.failureStreak??0)+1,5);
       state.failureStreak=streak;const delay=Math.min(maxDelay,minDelay*2**Math.max(0,streak-1));

@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {acquireLock} from './host-process-lock.mjs';
+import {runFeedLoop} from './host-retry-policy.mjs';
 import {capturePriceResponseMetadata} from './price-provider.js';
 const args=process.argv.slice(2), arg=name=>{const i=args.indexOf(name);return i>=0?args[i+1]:undefined};
 const configDir=arg('--config-dir'), account=arg('--account'), db=arg('--db'), cli=arg('--wrangler');
@@ -9,9 +12,7 @@ const SOL='So11111111111111111111111111111111111111112';
 const configPath=path.join(configDir,'.wrangler/config/default.toml');
 const output=arg('--output')||path.join(configDir,'host-reference-publisher.json');
 const lock=output+'.lock';let stopping=false;
-// One publisher per checkpoint. Stale lock is reclaimed only if its PID is gone.
-if(fs.existsSync(lock)){const pid=Number(fs.readFileSync(lock,'utf8'));try{process.kill(pid,0);throw Error('PUBLISHER_ALREADY_RUNNING')}catch(e){if(e.message==='PUBLISHER_ALREADY_RUNNING'||e.code!=='ESRCH')throw e;fs.unlinkSync(lock)}}
-fs.writeFileSync(lock,String(process.pid),{flag:'wx'});
+const releaseLock=acquireLock(lock,{script:fileURLToPath(import.meta.url),output});
 process.on('SIGINT',()=>{stopping=true});process.on('SIGTERM',()=>{stopping=true});
 let token,refreshAt=0;
 function refresh(){
@@ -27,7 +28,7 @@ async function query(sql,params=[]){
  if(r.status===401||r.status===403){refresh();r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({sql,params}),signal:AbortSignal.timeout(15000)})}
  const b=await r.json();if(!r.ok||!b.success)throw Error('DATABASE_REQUEST_FAILED');return b.result[0];
 }
-let state={startedAt:new Date().toISOString(),pid:process.pid,successes:0,failures:0};
+let state={startedAt:new Date().toISOString(),pid:process.pid,successes:0,failures:0,consecutiveFailures:0,status:'RUNNING'};
 function save(){fs.writeFileSync(output,JSON.stringify(state,null,2));}
 async function tick(){
  const result=await query("SELECT DISTINCT mint FROM paper_copy_positions WHERE status='PAPER_OPEN' AND remaining_token_amount>0 UNION SELECT DISTINCT mint FROM paper_research_positions WHERE status='RESEARCH_OPEN'");
@@ -48,9 +49,5 @@ async function tick(){
  state.successes++;state.last={observedAt,responseMetadata,mints:mints.length,priced:mints.filter(x=>tokenPrices[x]>0).length,changes:write.meta?.changes,rowsWritten:write.meta?.rows_written};
 }
 try{
- do{
-  const start=Date.now();try{await tick()}catch(e){state.failures++;state.lastError={at:new Date().toISOString(),reason:/^[A-Z_]+$/.test(e.message)?e.message:'REQUEST_OR_IO_FAILED'}}save();
-  if(args.includes('--once')||stopping)break;
-  await new Promise(r=>setTimeout(r,Math.max(1000,30000-(Date.now()-start))));
- }while(!stopping);
-}finally{try{if(Number(fs.readFileSync(lock,'utf8'))===process.pid)fs.unlinkSync(lock)}catch{}}
+ process.exitCode=await runFeedLoop({tick,state,save,once:args.includes('--once'),isStopping:()=>stopping});
+}finally{releaseLock();}
