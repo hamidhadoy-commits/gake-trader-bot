@@ -14,11 +14,11 @@ test('bad batches and read failures send no request',async()=>{
  const r=await probeNetlifyReferenceFeed(db(mints),{fetcher:()=>{throw Error('MUST_NOT_FETCH');}});
  assert.notEqual(r.status,'REQUEST_FAILED');
  }
- const r=await probeNetlifyReferenceFeed({prepare(){throw Error('private error');}});assert.deepEqual(r,{status:'REQUEST_FAILED'});
+ const r=await probeNetlifyReferenceFeed({prepare(){throw Error('private error');}});assert.equal(r.status,'REQUEST_FAILED');assert.equal(r.failureStage,'MINT_READ');assert.equal(JSON.stringify(r).includes('private error'),false);
 });
 test('HTTP errors, rate limits and malformed bodies never retry or write',async()=>{
  for(const response of [new Response('',{status:429}),new Response('',{status:502}),new Response('{'),new Response('x'.repeat(65537))]){
- let calls=0;const r=await probeNetlifyReferenceFeed(db(),{fetcher:async()=>{calls++;return response;}});assert.equal(calls,1);assert.deepEqual(r,{status:'REQUEST_FAILED'});
+ let calls=0;const r=await probeNetlifyReferenceFeed(db(),{fetcher:async()=>{calls++;return response;}});assert.equal(calls,1);assert.equal(r.status,'REQUEST_FAILED');assert.ok(r.failureStage);
  }
 });
 test('stale source, future timestamp, mismatched receipt, cache+transit age and SOL rejected',async()=>{

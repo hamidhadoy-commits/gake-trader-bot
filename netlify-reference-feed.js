@@ -5,6 +5,7 @@ const ACTIVE_MINTS_SQL = "SELECT DISTINCT mint FROM paper_copy_positions WHERE s
 const validMint = x => typeof x === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(x);
 // Read-only transport adapter. No database write, secret forwarding or retry.
 export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Date.now, timeoutMs = 12000} = {}) {
+  let failureStage = 'MINT_READ', httpStatus;
   try {
     const selected = await db.prepare(ACTIVE_MINTS_SQL).all();
     if (!selected?.success || !Array.isArray(selected.results)) return {status:'MINT_READ_REJECTED'};
@@ -15,12 +16,15 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
     let timer;
     const deadline = new Promise((_, reject) => {timer = setTimeout(() => {controller.abort(); reject(new Error('DEADLINE'));}, timeoutMs);});
     let body;
+    failureStage = 'FETCH';
     try {
       body = await Promise.race([(async () => {
         const response = await fetcher(NETLIFY_REFERENCE_URL, {method:'POST',
           headers:{'content-type':'application/json'},body:JSON.stringify({mints}),
           signal:controller.signal,redirect:'error'});
+        httpStatus = response.status;
         if (!response.ok) throw new Error('HTTP_REJECTED');
+        failureStage = 'BODY';
         const reader = response.body.getReader(), decoder = new TextDecoder();
         let size = 0, text = '';
         while (true) {
@@ -29,10 +33,12 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
           if (size > 65536) {await reader.cancel(); throw new Error('BODY_LIMIT');}
           text += decoder.decode(chunk.value,{stream:true});
         }
+        failureStage = 'JSON_PARSE';
         return JSON.parse(text + decoder.decode());
       })(), deadline]);
     } finally {clearTimeout(timer);}
     const completed = clock();
+    failureStage = 'VALIDATION';
     if (body?.status !== 'TRANSPORT_ACCEPTED' || body.attempts !== 1 ||
         body.productionConnected !== false || body.requested !== mints.length ||
         completed < started || completed - started > timeoutMs) return {status:'TRANSPORT_REJECTED'};
@@ -49,12 +55,15 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
     const prices = decodeHostReferenceFeed(row,mints,SOL,completed);
     return {status:'ACCEPTED',requested:mints.length,priced:prices.size,
       missing:mints.filter(x=>!prices.has(x)),elapsedMs:completed-started,row};
-  } catch {return {status:'REQUEST_FAILED'};}
+  } catch (error) {
+    return {status:'REQUEST_FAILED',failureStage,httpStatus,
+      errorClass:['Error','TypeError','SyntaxError','TimeoutError','AbortError'].includes(error?.name)?error.name:'Error'};
+  }
 }
 
 // Exactly these three future cron slots can run the read-only production canary.
 // Empty by default; populate only immediately before a bounded deployment.
-export const NETLIFY_CANARY_SLOTS = [1791659040000,1791659100000,1791659160000];
+export const NETLIFY_CANARY_SLOTS = [1791659460000,1791659520000,1791659580000];
 export async function runNetlifyReferenceCanary(env, scheduledTime,
     {slots = NETLIFY_CANARY_SLOTS, clock = Date.now, probe = probeNetlifyReferenceFeed} = {}) {
   const now = clock();
@@ -66,6 +75,7 @@ export async function runNetlifyReferenceCanary(env, scheduledTime,
     const summary = {message:'NETLIFY REFERENCE CANARY',scheduledTime,status:result.status,
       requested:result.requested,priced:result.priced,elapsedMs:result.elapsedMs,
       observedAt:result.row?.observed_at,cacheAgeSeconds:result.row ? JSON.parse(result.row.payload_json).responseMetadata?.responseAgeSeconds : undefined,
+      failureStage:result.failureStage,httpStatus:result.httpStatus,errorClass:result.errorClass,
       feedWritten:false,execution:'DISABLED',realMoney:false};
     console.log(summary);
     return summary;
