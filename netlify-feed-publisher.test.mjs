@@ -27,3 +27,16 @@ test('newer existing snapshot or D1 failure cannot be reported as published',asy
  const r=await refreshNetlifyReferenceFeed(db,{publish:true,clock:()=>now,probe:async()=>candidate()});assert.equal(r.feedWritten,false);assert.notEqual(r.status,'PUBLISHED');
  }
 });
+
+test('closed deadline rejects before probe and rechecks after probe',async()=>{
+ let probes=0,step=0;const db={prepare(){throw Error('MUST_NOT_WRITE');}};
+ const probe=async()=>{probes++;return candidate();};
+ assert.equal((await refreshNetlifyReferenceFeed(db,{publish:true,publishUntil:now,clock:()=>now,probe})).status,'PUBLICATION_WINDOW_CLOSED');assert.equal(probes,0);
+ const clock=()=>++step>=2?now+2000:now;
+ assert.equal((await refreshNetlifyReferenceFeed(db,{publish:true,publishUntil:now+1000,clock,probe})).status,'PUBLICATION_WINDOW_CLOSED');assert.equal(probes,1);
+});
+test('bounded write includes database-clock cutoff so delayed SQL cannot publish after expiry',async()=>{
+ const until=now+1000,c=candidate();let called=false;
+ const db={prepare(sql){called=true;assert.match(sql,/SELECT 1,\?,\? WHERE unixepoch/);assert.match(sql,/AND unixepoch\('now'\)\*1000<\?$/);return {bind(...args){assert.deepEqual(args,[c.row.observed_at,c.row.payload_json,until,until]);return {async run(){return {success:true,meta:{changes:0}};}};}};}};
+ const r=await refreshNetlifyReferenceFeed(db,{publish:true,publishUntil:until,clock:()=>now,probe:async()=>c});assert(called);assert.equal(r.feedWritten,false);
+});

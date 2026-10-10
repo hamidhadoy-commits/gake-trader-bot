@@ -14,3 +14,12 @@ test('real cron offset publishes only approved slot and reports failed writes tr
  const failed=await runNetlifyFeedTrial({DB},first,{slots,clock:()=>first,publisher:async()=>{throw Error('private');}});
  assert.equal(failed.status,'PUBLISH_FAILED');assert.equal(failed.feedWritten,false);
 });
+
+test('long trial caps requests at 240 and rejects holes and post-window events',async()=>{
+ const long=Array.from({length:240},(_,i)=>first+i*60000);let count=0;
+ const pub=async(db,o)=>{count++;assert.equal(o.publishUntil,long.at(-1)+90000);return {status:'PUBLISHED',feedWritten:true};};
+ for(const time of [long[0],long[119],long[239]])await runNetlifyFeedTrial({},time+24000,{slots:long,clock:()=>time+25000,publisher:pub});
+ assert.equal(count,3);
+ for(const ss of [[...long,long.at(-1)+60000],[first,first+60001]])assert.equal((await runNetlifyFeedTrial({},first,{slots:ss,clock:()=>first,publisher:pub})).status,'DISABLED');
+ assert.equal((await runNetlifyFeedTrial({},long.at(-1)+60000,{slots:long,clock:()=>long.at(-1)+60000,publisher:pub})).status,'DISABLED');assert.equal(count,3);
+});
