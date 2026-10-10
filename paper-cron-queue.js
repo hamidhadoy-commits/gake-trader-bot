@@ -1,7 +1,8 @@
 import {runNetlifyReferenceCanary} from './netlify-reference-feed.js';
+import {runNetlifyFeedTrial} from './netlify-feed-trial.js';
 const KIND = "GAKE_PAPER_CRON_V1";
 const CRON = "* * * * *";
-export function withPaperCronQueue(worker, {canary = runNetlifyReferenceCanary} = {}) {
+export function withPaperCronQueue(worker, {canary = runNetlifyReferenceCanary, feedTrial = runNetlifyFeedTrial} = {}) {
   return {
     ...worker,
     async scheduled(controller, env) {
@@ -37,6 +38,8 @@ export function withPaperCronQueue(worker, {canary = runNetlifyReferenceCanary} 
           // Bounded read-only canary. Its failure cannot stop the paper cycle.
           try { await canary(env, body.scheduledTime); }
           catch { console.warn({message:'NETLIFY CANARY ISOLATED FAILURE'}); }
+          try { await feedTrial(env, body.scheduledTime); }
+          catch { console.warn({message:'NETLIFY FEED TRIAL ISOLATED FAILURE'}); }
           await worker.scheduled({cron: CRON, scheduledTime: body.scheduledTime}, env, ctx);
           await env.DB.prepare(
             "UPDATE paper_cron_queue_runs SET status = 'COMPLETE', finished_at = ? WHERE id = ?"
