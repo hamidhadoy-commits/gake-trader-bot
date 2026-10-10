@@ -1,6 +1,7 @@
+import {runNetlifyReferenceCanary} from './netlify-reference-feed.js';
 const KIND = "GAKE_PAPER_CRON_V1";
 const CRON = "* * * * *";
-export function withPaperCronQueue(worker) {
+export function withPaperCronQueue(worker, {canary = runNetlifyReferenceCanary} = {}) {
   return {
     ...worker,
     async scheduled(controller, env) {
@@ -33,6 +34,9 @@ export function withPaperCronQueue(worker) {
         // A claimed delivery is never replayed: a partially completed paper cycle
         // is followed by the next minute's cycle, as with the original cron.
         try {
+          // Bounded read-only canary. Its failure cannot stop the paper cycle.
+          try { await canary(env, body.scheduledTime); }
+          catch { console.warn({message:'NETLIFY CANARY ISOLATED FAILURE'}); }
           await worker.scheduled({cron: CRON, scheduledTime: body.scheduledTime}, env, ctx);
           await env.DB.prepare(
             "UPDATE paper_cron_queue_runs SET status = 'COMPLETE', finished_at = ? WHERE id = ?"
