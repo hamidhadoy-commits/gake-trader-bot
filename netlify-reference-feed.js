@@ -54,11 +54,12 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
 
 // Exactly these three future cron slots can run the read-only production canary.
 // Empty by default; populate only immediately before a bounded deployment.
-export const NETLIFY_CANARY_SLOTS = [1791658860000,1791658920000,1791658980000];
+export const NETLIFY_CANARY_SLOTS = [1791659040000,1791659100000,1791659160000];
 export async function runNetlifyReferenceCanary(env, scheduledTime,
     {slots = NETLIFY_CANARY_SLOTS, clock = Date.now, probe = probeNetlifyReferenceFeed} = {}) {
   const now = clock();
-  if (slots.length > 3 || !slots.includes(scheduledTime) || now < scheduledTime ||
+  const minute = Math.floor(scheduledTime / 60000) * 60000;
+  if (slots.length > 3 || !slots.includes(minute) || now < scheduledTime ||
       now - scheduledTime > 70000) return {status:'DISABLED'};
   try {
     const result = await probe(env.DB);

@@ -48,3 +48,11 @@ test('canary cannot write feed and probe failure never escapes',async()=>{
  assert.equal((await runNetlifyReferenceCanary({},now,{slots:[now],clock:()=>now,probe:()=>{throw Error('secret');}})).status,'CANARY_FAILED');
  }finally{console.log=log;console.warn=warn;}
 });
+test('actual cron timestamp can have a seconds offset within the selected minute',async()=>{
+ const saved=console.log;console.log=()=>{};
+ try{
+ let calls=0;const scheduledTime=now+24000;
+ const r=await runNetlifyReferenceCanary({},scheduledTime,{slots:[now],clock:()=>scheduledTime+1000,probe:async()=>{calls++;return {status:'ACCEPTED'};}});
+ assert.equal(calls,1);assert.equal(r.status,'ACCEPTED');
+ }finally{console.log=saved;}
+});
