@@ -6,7 +6,7 @@ const db=(mints=[A,B])=>({prepare(sql){assert.match(sql,/^SELECT DISTINCT mint/)
 const body=()=>({status:'TRANSPORT_ACCEPTED',productionConnected:false,attempts:1,requested:2,observedAt:new Date(now-1000).toISOString(),tokenPrices:{[SOL]:100,[A]:2,unrequested:999},responseMetadata:{httpStatus:200,requestStartedAt:new Date(now-1500).toISOString(),responseReceivedAt:new Date(now-1000).toISOString(),responseAgeSeconds:0}});
 test('one fixed public POST, no secrets, partial coverage and production gate',async()=>{
  let calls=0;
- const r=await probeNetlifyReferenceFeed(db(),{clock:()=>now,fetcher:async(url,opts)=>{calls++;assert.equal(url,NETLIFY_REFERENCE_URL);assert.equal(opts.redirect,'error');assert.deepEqual(opts.headers,{'content-type':'application/json'});assert.deepEqual(JSON.parse(opts.body),{mints:[A,B]});return Response.json(body());}});
+ const r=await probeNetlifyReferenceFeed(db(),{clock:()=>now,fetcher:async(url,opts)=>{calls++;assert.equal(url,NETLIFY_REFERENCE_URL);assert.equal(opts.redirect,'manual');assert.deepEqual(opts.headers,{'content-type':'application/json'});assert.deepEqual(JSON.parse(opts.body),{mints:[A,B]});return Response.json(body());}});
  assert.equal(calls,1);assert.equal(r.status,'ACCEPTED');assert.equal(r.priced,1);assert.deepEqual(r.missing,[B]);assert.equal(JSON.parse(r.row.payload_json).tokenPrices.unrequested,undefined);
 });
 test('bad batches and read failures send no request',async()=>{
@@ -55,4 +55,8 @@ test('actual cron timestamp can have a seconds offset within the selected minute
  const r=await runNetlifyReferenceCanary({},scheduledTime,{slots:[now],clock:()=>scheduledTime+1000,probe:async()=>{calls++;return {status:'ACCEPTED'};}});
  assert.equal(calls,1);assert.equal(r.status,'ACCEPTED');
  }finally{console.log=saved;}
+});
+test('redirect response is rejected with no follow-up request',async()=>{
+ let calls=0;const r=await probeNetlifyReferenceFeed(db(),{fetcher:async(_,opts)=>{calls++;assert.equal(opts.redirect,'manual');return new Response('',{status:302,headers:{location:'https://example.com/'}});}});
+ assert.equal(calls,1);assert.equal(r.status,'REQUEST_FAILED');assert.equal(r.httpStatus,302);
 });

@@ -21,7 +21,7 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
       body = await Promise.race([(async () => {
         const response = await fetcher(NETLIFY_REFERENCE_URL, {method:'POST',
           headers:{'content-type':'application/json'},body:JSON.stringify({mints}),
-          signal:controller.signal,redirect:'error'});
+          signal:controller.signal,redirect:'manual'});
         httpStatus = response.status;
         if (!response.ok) throw new Error('HTTP_REJECTED');
         failureStage = 'BODY';
@@ -63,7 +63,7 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
 
 // Exactly these three future cron slots can run the read-only production canary.
 // Empty by default; populate only immediately before a bounded deployment.
-export const NETLIFY_CANARY_SLOTS = [1791659460000,1791659520000,1791659580000];
+export const NETLIFY_CANARY_SLOTS = [1791659820000,1791659880000,1791659940000];
 export async function runNetlifyReferenceCanary(env, scheduledTime,
     {slots = NETLIFY_CANARY_SLOTS, clock = Date.now, probe = probeNetlifyReferenceFeed} = {}) {
   const now = clock();
