@@ -54,7 +54,7 @@ export async function probeNetlifyReferenceFeed(db, {fetcher = fetch, clock = Da
 
 // Exactly these three future cron slots can run the read-only production canary.
 // Empty by default; populate only immediately before a bounded deployment.
-export const NETLIFY_CANARY_SLOTS = [1791658680000,1791658740000,1791658800000];
+export const NETLIFY_CANARY_SLOTS = [1791658860000,1791658920000,1791658980000];
 export async function runNetlifyReferenceCanary(env, scheduledTime,
     {slots = NETLIFY_CANARY_SLOTS, clock = Date.now, probe = probeNetlifyReferenceFeed} = {}) {
   const now = clock();
