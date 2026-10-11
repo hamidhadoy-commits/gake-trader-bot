@@ -1,6 +1,6 @@
 import {refreshNetlifyReferenceFeed} from './netlify-feed-publisher.js';
 // Finite deployment trial. Outside up to 240 consecutive approved minutes: no I/O.
-export const NETLIFY_FEED_TRIAL_SLOTS = [1791716400000,1791716460000,1791716520000,1791716580000,1791716640000];
+export const NETLIFY_FEED_TRIAL_SLOTS = [];
 export async function runNetlifyFeedTrial(env,scheduledTime,
   {slots=NETLIFY_FEED_TRIAL_SLOTS,clock=Date.now,publisher=refreshNetlifyReferenceFeed}={}) {
   const now=clock(),minute=Math.floor(scheduledTime/60000)*60000,
