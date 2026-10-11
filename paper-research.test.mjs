@@ -269,3 +269,49 @@ test('metadata persistence failure preserves mark and does not block valid exit'
     assert.equal(h.db.prepare('SELECT COUNT(*) AS n FROM paper_research_marks').get().n,2);
   }finally{h.close();}
 });
+
+test('finite Mark scheduler checks young positions each minute within fixed budgets and captured risk',async()=>{
+ const h=setup();try{
+   await h.run();for(let i=0;i<20;i++)h.add('old'+i);h.deps.maxMarks=4;h.deps.maxQuotes=2;
+   for(let i=0;i<5;i++){await h.run();h.advance(60000);}
+   h.advance(3600000);h.add('youngA');h.add('youngB');
+   h.deps.observationTrial={startsAtMs:h.now(),endsAtMs:h.now()+600000};
+   const originalConfig=JSON.stringify(h.config),cash=h.db.prepare('SELECT cash_balance_lamports FROM paper_copy_account').get().cash_balance_lamports;
+   for(let i=0;i<3;i++){
+     const r=await h.run();assert.equal(r.marked,4);assert.equal(r.quotes,0);assert.equal(r.observationScheduler,'MARK_RECENT_2_FAIR_V1');
+     for(const sig of ['youngA','youngB'])assert.equal(h.position(sig).last_checked_at,new Date(h.now()).toISOString());
+     h.advance(60000);
+   }
+   assert.equal(JSON.stringify(h.config),originalConfig);
+   assert.equal(h.db.prepare('SELECT cash_balance_lamports FROM paper_copy_account').get().cash_balance_lamports,cash);
+   const meta=JSON.parse(h.db.prepare("SELECT response_metadata_json FROM paper_research_feed_metadata WHERE source_signature='youngA' ORDER BY checked_at DESC LIMIT 1").get().response_metadata_json);
+   assert.equal(meta.observationScheduler.version,'MARK_RECENT_2_FAIR_V1');
+   assert.equal(meta.responseMetadata,null);
+   h.advance(600000);const expired=await h.run();assert.equal(expired.observationScheduler,undefined);
+ }finally{h.close();}
+});
+test('finite scheduler preserves exact TP amount, two-quote cap and failed exits',async()=>{
+ const h=setup();try{
+   await h.run();h.advance(1000);for(let i=0;i<4;i++)h.add('young'+i);
+   h.deps.maxMarks=4;h.deps.maxQuotes=2;h.deps.observationTrial={startsAtMs:h.now(),endsAtMs:h.now()+600000};
+   await h.run();h.mark(0.00008);const r=await h.run();
+   assert.equal(r.marked,4);assert.equal(r.quotes,2);assert.equal(r.exits,2);
+   assert.deepEqual(h.requests.map(x=>x.rawTokenAmount),['300000000','300000000']);
+   assert.equal(h.position('young0').remaining_raw_amount,'700000000');
+   assert.equal(h.position('young1').remaining_raw_amount,'700000000');
+   assert.equal(h.position('young2').take_profit_hit,0);
+   // All entries retain the config captured at admission, despite active-config changes.
+   h.config.stop_loss_bps=9000;h.mark(0.00004);h.fail('no_route');
+   const failed=await h.run();assert.equal(failed.quotes,2);assert.equal(failed.exits,0);
+   assert.equal(h.position('young0').status,'RESEARCH_OPEN');
+   assert.equal(h.db.prepare("SELECT COUNT(*) n FROM paper_research_exit_attempts WHERE exit_reason='STOP_LOSS' AND executable=0").get().n,2);
+ }finally{h.close();}
+});
+test('invalid finite windows fail before research observations and leave default phase unchanged',async()=>{
+ const h=await entered();try{
+   const before=h.db.prepare('SELECT COUNT(*) n FROM paper_research_marks').get().n;
+   h.deps.observationTrial={startsAtMs:h.now(),endsAtMs:h.now()+3600001};
+   await assert.rejects(h.run(),/Invalid finite observation trial/);
+   assert.equal(h.db.prepare('SELECT COUNT(*) n FROM paper_research_marks').get().n,before);
+ }finally{h.close();}
+});

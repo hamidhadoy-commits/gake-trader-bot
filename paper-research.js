@@ -1,3 +1,4 @@
+import {loadResearchObservationCandidates,observationTrialActive,OBSERVATION_SCHEDULER_VERSION} from './paper-observation-scheduler.mjs';
 const RUN = "EXACT_ENTRY_EXIT_CYCLE_V1";
 const WSOL = "So11111111111111111111111111111111111111112";
 const rawValid = value => typeof value === "string" && /^[1-9]\d*$/.test(value) &&
@@ -150,20 +151,18 @@ export async function recordResearchExit(env, position, config, intent, quote, m
 
 export async function runResearchExitCycle(env, {
   getConfig, priceFeed, sellQuote, now=()=>Date.now(),
-  maxMarks=8, maxQuotes=4,
+  maxMarks=8, maxQuotes=4, observationTrial=null,
 }={}) {
   const activeConfig = await getConfig(env);
   if (Number(activeConfig?.enabled) !== 1) {
     return {admitted:0,marked:0,quotes:0,exits:0,missingPrices:0,paused:true};
   }
+  observationTrialActive(observationTrial,now()); // Reject invalid trial windows before admission writes.
   const admitted = await admitResearchEntries(env,activeConfig,now());
   const markLimit = Math.max(1,Math.min(8,Math.floor(Number(maxMarks)||1)));
   const quoteLimit = Math.max(0,Math.min(4,Math.floor(Number(maxQuotes)||0)));
-  const result = await query(env,`
-    SELECT * FROM paper_research_positions WHERE status='RESEARCH_OPEN'
-    ORDER BY COALESCE(last_checked_at,admitted_at),admitted_at,source_signature LIMIT ?
-  `,[markLimit]);
-  const positions=result.results || [];
+  const selection = await loadResearchObservationCandidates(env,now(),markLimit,observationTrial);
+  const positions=selection.positions;
   if (!positions.length) return {admitted,marked:0,quotes:0,exits:0,missingPrices:0};
   const feedStartedAt = new Date(now()).toISOString();
   const prices = await priceFeed(positions.map(p=>p.mint),{
@@ -202,7 +201,7 @@ export async function runResearchExitCycle(env, {
           source_signature,position_revision,checked_at,mark_source,response_metadata_json
         ) VALUES (?,?,?,?,?)
       `,[p.source_signature,current.revision,observationAt,valid?(info.source || "UNKNOWN"):null,
-        valid && info.responseMetadata ? JSON.stringify(info.responseMetadata) : null],"run");
+        selection.active ? JSON.stringify({responseMetadata:valid ? info.responseMetadata ?? null : null,observationScheduler:{version:OBSERVATION_SCHEDULER_VERSION,startsAtMs:observationTrial.startsAtMs,endsAtMs:observationTrial.endsAtMs,recentWindowMs:900000,reservedSlots:Math.min(2,Math.floor(markLimit/2))}}) : valid && info.responseMetadata ? JSON.stringify(info.responseMetadata) : null],"run");
     } catch (error) {
       console.error({message:"RESEARCH MARK HISTORY ERROR",sourceSignature:p.source_signature,
         error:String(error),execution:"DISABLED",realMoney:false});
@@ -230,7 +229,7 @@ export async function runResearchExitCycle(env, {
       if(current.status!=="RESEARCH_OPEN") break;
     }
   }
-  const summary={admitted,marked:positions.length,quotes,exits,missingPrices};
+  const summary={admitted,marked:positions.length,quotes,exits,missingPrices,...(selection.active?{observationScheduler:OBSERVATION_SCHEDULER_VERSION}:{})};
   console.log({message:"RESEARCH EXIT CYCLE COMPLETE",...summary,execution:"DISABLED",realMoney:false});
   return summary;
 }

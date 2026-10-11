@@ -44,3 +44,20 @@ D1 prior-day 86356/100000 writes is existing evidence, not new daily usage.
 Fresh Netlify compute billing and full-cycle profiling remain outstanding.
 
 execution=DISABLED; realMoney=false; no signing or real trading.
+
+## Integration update — 2026-10-11
+Mark research now imports the bounded loader. The caller defaults to null, so
+production activation still requires an explicit finite startsAtMs/endsAtMs.
+Windows are at most one hour and stop at the exclusive end boundary.
+Trial observations record scheduler version/window alongside response metadata.
+Both selection queries use research_open_order. Actual recent query: 20 rows
+read, 0 written, SQL duration 0.2345ms on the 20-position snapshot.
+60 selected tests passed, including finite boundaries, exact partial TP,
+two-quote cap, unavailable routes, frozen entry config and default fallback.
+Full local Worker ran main/Quote/Mark plus queue completion on a copied
+3/22/20-open-position fixture. Two admission timestamps were synthetic.
+Four controlled ticks, including expiry, passed; account and risk unchanged.
+External prices were mocked unavailable: this validates failure behavior, not
+profitable fills or valid-price full-cycle CPU. Local wall time is not live CPU.
+Isolated simulator upgraded to Miniflare 5.20261006.1-alpha/workerd 1.20261006.1;
+compatibilityDate stayed 2026-09-10; production dependencies were not changed.

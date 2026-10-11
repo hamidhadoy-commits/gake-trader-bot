@@ -32,3 +32,20 @@ test('capacity exposes old-position tradeoff and TP quote limitation',()=>{
  caveat:'Planning bound only: assumes complete candidate set, stable arrivals and one successful observation per slot. TP slice quotes, provider delays and queue failures can lengthen it.'});
  assert.equal(observationCapacity({openPositions:20}).baselineRotationSeconds,300);
 });
+
+test('finite trial boundary and loader keep default query count and bounded treatment candidates',async()=>{
+ const {observationTrialActive,loadResearchObservationCandidates}=await import('./paper-observation-scheduler.mjs');
+ const trial={startsAtMs:now,endsAtMs:now+600000};
+ assert.equal(observationTrialActive(trial,now-1),false);
+ assert.equal(observationTrialActive(trial,now),true);
+ assert.equal(observationTrialActive(trial,now+599999),true);
+ assert.equal(observationTrialActive(trial,now+600000),false);
+ const calls=[],old=Array.from({length:4},(_,i)=>p('old'+i,3600000,now-600000+i)),young=[p('youngA',1000),p('youngB',1000)];
+ const env={DB:{prepare(sql){return {bind(...values){calls.push({sql,values});return {async all(){return {results:sql.includes('admitted_at>=?')?young:old};}};}};}}};
+ const baseline=await loadResearchObservationCandidates(env,now,4,null);
+ assert.equal(baseline.active,false);assert.equal(calls.length,1);assert.deepEqual(calls[0].values,[4]);
+ calls.length=0;const treatment=await loadResearchObservationCandidates(env,now,4,trial);
+ assert.equal(treatment.active,true);assert.equal(calls.length,2);assert.equal(calls[1].values[2],2);
+ assert.deepEqual(treatment.positions.map(x=>x.source_signature),['youngA','youngB','old0','old1']);
+ await assert.rejects(loadResearchObservationCandidates(env,now,100,trial),/Invalid observation budget/);
+});
