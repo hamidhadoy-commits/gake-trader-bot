@@ -1,4 +1,3 @@
-const MARK_OBSERVATION_TRIAL = Object.freeze({startsAtMs:1791720480000,endsAtMs:1791720660000});
 import { withPaperCronQueue } from "./paper-cron-queue.js";
 import { buildDirectPumpCandidate, validateDirectPumpCandidate } from "./direct-pump-buy.js";
 import {
@@ -4202,7 +4201,6 @@ const paperWorker = {
         priceFeed: (mints,options) => fetchPaperExitSolPrices(mints,{...options,referenceDb:env.DB}),
         sellQuote: fetchJupiterExecutableSellQuote,
         maxMarks: 4,
-        observationTrial: MARK_OBSERVATION_TRIAL,
         maxQuotes: 2,
       }));
     } catch (error) {
