@@ -20,7 +20,7 @@ test('real cron offset publishes only approved slot and reports failed writes tr
 });
 test('240 approved wall-clock minutes bound calls; holes and post-window events are rejected',async()=>{
  const long=Array.from({length:240},(_,i)=>first+i*60000),DB=database();let count=0;
- const pub=async(db,o)=>{count++;assert.equal(o.publishUntil,long.at(-1)+90000);return accepted();};
+ const pub=async(db,o)=>{count++;assert.equal(o.publishUntil,long.at(-1)+60000);return accepted();};
  for(const time of [long[0],long[119],long[239]])await runNetlifyFeedTrial({DB},time+24000,{slots:long,clock:()=>time+25000,publisher:pub});
  assert.equal(count,3);
  for(const ss of [[...long,long.at(-1)+60000],[first,first+60001]])assert.equal((await runNetlifyFeedTrial({DB},first,{slots:ss,clock:()=>first,publisher:pub})).status,'DISABLED');
@@ -67,4 +67,15 @@ test('slow lookup cannot carry provider call into the next wall-clock minute',as
   const out=await runNetlifyFeedTrial({DB:database()},first+29000,{slots,clock:()=>now,publisher:async(db,o)=>{now=first+60000;return o.fetcher('https://invalid.example');}});
   assert.equal(out.status,'PUBLISH_FAILED');assert.equal(fetches,0);
  }finally{globalThis.fetch=original;}
+});
+
+test('last-minute publisher cutoff ends at next minute and rejects an in-flight late write',async()=>{
+ const {refreshNetlifyReferenceFeed}=await import('./netlify-feed-publisher.js');
+ const end=slots.at(-1)+60000;let now=end-1,writes=0;
+ const DB={prepare(){writes++;throw Error('NO_WRITE');}};
+ const result=await runNetlifyFeedTrial({DB:database()},slots.at(-1)+29000,{slots,clock:()=>now,publisher:async(_,o)=>{
+  assert.equal(o.publishUntil,end);now=end;
+  return refreshNetlifyReferenceFeed(DB,{...o,probe:async()=>{throw Error('NO_PROBE');}});
+ }});
+ assert.equal(result.status,'PUBLICATION_WINDOW_CLOSED');assert.equal(writes,0);
 });

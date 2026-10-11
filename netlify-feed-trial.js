@@ -1,6 +1,6 @@
 import {refreshNetlifyReferenceFeed} from './netlify-feed-publisher.js';
 // Finite deployment trial. Outside up to 240 consecutive approved minutes: no I/O.
-export const NETLIFY_FEED_TRIAL_SLOTS = [];
+export const NETLIFY_FEED_TRIAL_SLOTS = [1791716400000,1791716460000,1791716520000,1791716580000,1791716640000];
 export async function runNetlifyFeedTrial(env,scheduledTime,
   {slots=NETLIFY_FEED_TRIAL_SLOTS,clock=Date.now,publisher=refreshNetlifyReferenceFeed}={}) {
   const now=clock(),minute=Math.floor(scheduledTime/60000)*60000,
@@ -23,7 +23,7 @@ export async function runNetlifyFeedTrial(env,scheduledTime,
   if (claim.meta.changes===0) return {status:'DUPLICATE_MINUTE_SKIPPED',feedWritten:false};
   if (claim.meta.changes!==1) return {status:'CLAIM_FAILED',feedWritten:false};
   let result;
-  try {result=await publisher(env.DB,{publish:true,clock,publishUntil:slots.at(-1)+90000,
+  try {result=await publisher(env.DB,{publish:true,clock,publishUntil:slots.at(-1)+60000,
     fetcher:(...args)=>{
       // A slow DB lookup must not carry an old reservation into a new minute.
       if (Math.floor(clock()/60000)*60000!==currentMinute)
