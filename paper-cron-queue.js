@@ -10,7 +10,14 @@ export function withPaperCronQueue(worker, {canary = runNetlifyReferenceCanary, 
       const scheduledTime = controller?.scheduledTime;
       if (!Number.isSafeInteger(scheduledTime) || scheduledTime <= 0 || controller?.cron !== CRON)
         throw new Error("Invalid paper cron event");
-      await env.PAPER_CRON_QUEUE.send({kind: KIND, cron: CRON, scheduledTime});
+      // Price publication must not wait for delivery of a Paper queue message.
+      // Start both paths independently; retain queue failures after feed settles.
+      const enqueue = Promise.resolve().then(() =>
+        env.PAPER_CRON_QUEUE.send({kind: KIND, cron: CRON, scheduledTime}));
+      const publish = Promise.resolve().then(() => feedTrial(env, scheduledTime))
+        .catch(() => console.warn({message:'NETLIFY FEED TRIAL ISOLATED FAILURE'}));
+      const [queued] = await Promise.allSettled([enqueue, publish]);
+      if (queued.status === 'rejected') throw queued.reason;
       console.log({message: "PAPER CRON QUEUED", scheduledTime, execution: "DISABLED", realMoney: false});
     },
     async queue(batch, env, ctx) {
@@ -38,8 +45,6 @@ export function withPaperCronQueue(worker, {canary = runNetlifyReferenceCanary, 
           // Bounded read-only canary. Its failure cannot stop the paper cycle.
           try { await canary(env, body.scheduledTime); }
           catch { console.warn({message:'NETLIFY CANARY ISOLATED FAILURE'}); }
-          try { await feedTrial(env, body.scheduledTime); }
-          catch { console.warn({message:'NETLIFY FEED TRIAL ISOLATED FAILURE'}); }
           await worker.scheduled({cron: CRON, scheduledTime: body.scheduledTime}, env, ctx);
           await env.DB.prepare(
             "UPDATE paper_cron_queue_runs SET status = 'COMPLETE', finished_at = ? WHERE id = ?"
