@@ -36,3 +36,27 @@ export function analyzeSellability(snapshot) {
  }
  return result;
 }
+
+export function valueRemainingCohorts(snapshot,maxAgeMs=600000) {
+ if(snapshot?.rowsWritten!==0||snapshot.execution!=='DISABLED'||snapshot.realMoney!==false)throw Error('READ_ONLY_PAPER_SNAPSHOT_REQUIRED');
+ const now=Date.parse(snapshot.at);if(!Number.isFinite(now)||!Number.isSafeInteger(maxAgeMs)||maxAgeMs<1)throw Error('INVALID_VALUATION_TIME');
+ const groups={};
+ for(const [label,positions] of Object.entries(snapshot.groups)){
+  const rows=positions.map(p=>{
+   if(p.status!=='RESEARCH_OPEN')return {sourceSignature:p.source_signature,known:false,reason:'position_not_open'};
+   const o=snapshot.observations.filter(o=>o.source_signature===p.source_signature&&o.request_kind==='REMAINING_MARK'&&o.input_raw_amount===p.remaining_raw_amount&&o.token_decimals===p.decimals&&o.position_revision===p.revision).sort((a,b)=>b.id-a.id)[0];
+   const age=o?now-Date.parse(o.checked_at):NaN;
+   if(!o||!Number.isFinite(age)||age<0||age>maxAgeMs||o.executable!==1||!Number.isSafeInteger(o.out_lamports)||o.out_lamports<=0)return {sourceSignature:p.source_signature,known:false,reason:!o?'no_matching_remaining_quote':!Number.isFinite(age)||age<0||age>maxAgeMs?'quote_outside_age_window':o.reason,quoteAt:o?.checked_at};
+   const c=JSON.parse(p.config_json);
+   if(!Number.isSafeInteger(c.sell_slippage_bps)||c.sell_slippage_bps<0||c.sell_slippage_bps>10000||!Number.isSafeInteger(c.sell_fee_lamports)||c.sell_fee_lamports<0||!['entry_cost_lamports','allocated_cost_lamports','modeled_pnl_lamports'].every(k=>Number.isSafeInteger(p[k]))||p.allocated_cost_lamports<0||p.allocated_cost_lamports>p.entry_cost_lamports)throw Error('INVALID_ACCOUNTING');
+   const modeledNet=BigInt(o.out_lamports)*BigInt(10000-c.sell_slippage_bps)/10000n-BigInt(c.sell_fee_lamports);
+   const remainingCost=BigInt(p.entry_cost_lamports)-BigInt(p.allocated_cost_lamports);
+   return {sourceSignature:p.source_signature,known:true,quoteAt:o.checked_at,ageMs:age,outLamports:String(o.out_lamports),remainingModeledNetLamports:modeledNet.toString(),remainingCostLamports:remainingCost.toString(),partialModeledPnlLamports:String(p.modeled_pnl_lamports),estimatedTotalPnlLamports:(modeledNet-remainingCost+BigInt(p.modeled_pnl_lamports)).toString()};
+  });
+  const allKnown=rows.length>0&&rows.every(r=>r.known);
+  groups[label]={positions:rows.length,known:rows.filter(r=>r.known).length,unknown:rows.filter(r=>!r.known).length,maxAgeMs,oldestQuoteAgeMs:rows.some(r=>r.known)?Math.max(...rows.filter(r=>r.known).map(r=>r.ageMs)):null,
+   estimatedTotalPnlLamports:allKnown?rows.reduce((v,r)=>v+BigInt(r.estimatedTotalPnlLamports),0n).toString():null,
+   initialCostLamports:positions.reduce((v,p)=>v+BigInt(p.entry_cost_lamports),0n).toString(),rows};
+ }
+ return {at:snapshot.at,scope:'HISTORICAL_QUOTE_ESTIMATE_NOT_EXECUTED_OR_SHARED_PORTFOLIO',maxAgeMs,profitabilityEstablished:false,groups};
+}
