@@ -12,9 +12,9 @@ if(!configDir||!account||!db||!cli)throw Error('REQUIRED_ARGUMENT_MISSING');
 const SOL='So11111111111111111111111111111111111111112';
 const configPath=path.join(configDir,'.wrangler/config/default.toml');
 const output=arg('--output')||path.join(configDir,'host-reference-publisher.json');
-const lock=output+'.lock';let stopping=false;
+const lock=output+'.lock';let stopping=false;const stopController=new AbortController();
 const releaseLock=acquireLock(lock,{script:fileURLToPath(import.meta.url),output});
-process.on('SIGINT',()=>{stopping=true});process.on('SIGTERM',()=>{stopping=true});
+process.on('SIGINT',()=>{stopping=true;stopController.abort()});process.on('SIGTERM',()=>{stopping=true;stopController.abort()});
 let token,refreshAt=0;
 function refresh(){
  const r=spawnSync(process.execPath,[cli,'deployments','list'],{env:{...process.env,XDG_CONFIG_HOME:configDir,WRANGLER_SEND_METRICS:'false'},encoding:'utf8',timeout:30000});
@@ -50,5 +50,5 @@ async function tick(){
  state.successes++;state.last={observedAt,responseMetadata,capacityLimited:selection.capacityLimited,observedMintsLowerBound:selection.observedMintsLowerBound,mints:mints.length,priced:mints.filter(x=>tokenPrices[x]>0).length,changes:write.meta?.changes,rowsWritten:write.meta?.rows_written};
 }
 try{
- process.exitCode=await runFeedLoop({tick,state,save,once:args.includes('--once'),isStopping:()=>stopping});
+ process.exitCode=await runFeedLoop({tick,state,save,once:args.includes('--once'),recoverTransient:args.includes('--recover-transient'),stopSignal:stopController.signal,isStopping:()=>stopping});
 }finally{releaseLock();}

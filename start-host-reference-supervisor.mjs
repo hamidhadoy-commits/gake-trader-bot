@@ -12,7 +12,7 @@ const publisherLock=path.join(dir,'publisher.json.lock');
 if(lockIsActive(publisherLock,{script:publisher,output:path.join(dir,'publisher.json')}))throw Error('EXISTING_PUBLISHER_ACTIVE');
 const info=inspectProcess(record.pid);
 if(info?.command.toLowerCase().includes(publisher.toLowerCase()))throw Error('EXISTING_PUBLISHER_ACTIVE');
-const config={publisher,publisherArgs:record.args.slice(1),cwd,output:path.join(dir,'supervisor.json'),maxRestarts:2};
+const config={publisher,publisherArgs:[...record.args.slice(1),...(record.args.includes('--recover-transient')?[]:['--recover-transient'])],cwd,output:path.join(dir,'supervisor.json'),maxRestarts:2};
 const configPath=path.join(dir,'supervisor-config.json');fs.writeFileSync(configPath,JSON.stringify(config,null,2));
 const child=spawn(process.execPath,[path.join(cwd,'host-reference-supervisor.mjs'),'--config',configPath],{cwd,detached:true,stdio:'ignore',windowsHide:true});child.unref();
 fs.writeFileSync(path.join(dir,'supervisor-process.json'),JSON.stringify({pid:child.pid,startedAt:new Date().toISOString(),mode:'PROJECT_PROCESS_NO_AUTOSTART'},null,2));console.log(JSON.stringify({supervisorPid:child.pid}));
