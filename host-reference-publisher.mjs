@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {HOST_FEED_SELECTION_SQL,selectHostFeedMints} from './host-feed-selection.mjs';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -31,9 +32,9 @@ async function query(sql,params=[]){
 let state={startedAt:new Date().toISOString(),pid:process.pid,successes:0,failures:0,consecutiveFailures:0,status:'RUNNING'};
 function save(){fs.writeFileSync(output,JSON.stringify(state,null,2));}
 async function tick(){
- const result=await query("SELECT DISTINCT mint FROM paper_copy_positions WHERE status='PAPER_OPEN' AND remaining_token_amount>0 UNION SELECT DISTINCT mint FROM paper_research_positions WHERE status='RESEARCH_OPEN'");
- const mints=result.results.map(x=>x.mint).filter(Boolean);if(!mints.length){state.last={at:new Date().toISOString(),mints:0};return}
- // One coherent response per published snapshot. Bigger populations safely use existing providers.
+ const result=await query(HOST_FEED_SELECTION_SQL);
+ const selection=selectHostFeedMints(result.results),{mints}=selection;if(!mints.length){state.last={at:new Date().toISOString(),mints:0};return}
+ // One coherent response; keep Main and the next due research observations in the bounded batch.
  if(mints.length>29)throw Error('HOST_FEED_BATCH_LIMIT');
  const addresses=[...new Set([...mints,SOL])];const start=Date.now();
  const response=await fetch('https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/'+addresses.map(encodeURIComponent).join(','),{headers:{accept:'application/json;version=20230302'},signal:AbortSignal.timeout(10000)});
@@ -46,7 +47,7 @@ async function tick(){
  const payload={schemaVersion:1,provider:'GECKOTERMINAL_PUBLIC',wrappedSolMint:SOL,tokenPrices,responseMetadata};
  const observedAt=new Date(end).toISOString();
  const write=await query('INSERT INTO paper_reference_price_feed(id,observed_at,payload_json) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET observed_at=excluded.observed_at,payload_json=excluded.payload_json WHERE excluded.observed_at>paper_reference_price_feed.observed_at',[observedAt,JSON.stringify(payload)]);
- state.successes++;state.last={observedAt,responseMetadata,mints:mints.length,priced:mints.filter(x=>tokenPrices[x]>0).length,changes:write.meta?.changes,rowsWritten:write.meta?.rows_written};
+ state.successes++;state.last={observedAt,responseMetadata,capacityLimited:selection.capacityLimited,observedMintsLowerBound:selection.observedMintsLowerBound,mints:mints.length,priced:mints.filter(x=>tokenPrices[x]>0).length,changes:write.meta?.changes,rowsWritten:write.meta?.rows_written};
 }
 try{
  process.exitCode=await runFeedLoop({tick,state,save,once:args.includes('--once'),isStopping:()=>stopping});
