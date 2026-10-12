@@ -1,3 +1,4 @@
+import {runSharedPaperCycle} from './paper-shared-portfolio.js';
 import { withPaperCronQueue } from "./paper-cron-queue.js";
 import { buildDirectPumpCandidate, validateDirectPumpCandidate } from "./direct-pump-buy.js";
 import {
@@ -4186,11 +4187,22 @@ const paperWorker = {
 
     // Preserve phase order, quote budgets, and existing failure behavior.
     try {
-      await observePhase("QUOTE_RESEARCH", () => runQuoteResearchExitCycle(env, {
-        getConfig: getPaperCopyConfig,
-        sellQuote: fetchJupiterExecutableSellQuote,
-        maxQuotes: 4,
-      }));
+      await observePhase("QUOTE_RESEARCH", async () => {
+        const phaseConfig = await getPaperCopyConfig(env);
+        const shared = await runSharedPaperCycle(env, {
+          getConfig: async () => phaseConfig,
+          buyQuote: fetchJupiterExecutableBuyQuote,
+          sellQuote: fetchJupiterExecutableSellQuote,
+          maxQuoteUnits: 4,
+          scheduledTime: controller?.scheduledTime || Date.now(),
+        });
+        // Same four request units: a buy reserves decimal lookup plus its order.
+        await runQuoteResearchExitCycle(env, {
+          getConfig: async () => phaseConfig,
+          sellQuote: fetchJupiterExecutableSellQuote,
+          maxQuotes: Math.max(0,4-shared.quoteUnitsUsed),
+        });
+      });
     } catch (error) {
       console.error({message: "QUOTE RESEARCH EXIT CYCLE ERROR",
         error: String(error), execution: "DISABLED", realMoney: false});
