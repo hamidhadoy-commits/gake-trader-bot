@@ -1,6 +1,6 @@
 import {captureResearchConfig,chooseResearchExit} from './paper-research.js';
 import {decodeHostReferenceFeed} from './price-provider.js';
-export const SHARED_PAPER_RUN='PAPER_CASH_20USD_20261012_V1';
+export const SHARED_PAPER_RUN='PAPER_CASH_20USD_20261014_V2';
 const WSOL='So11111111111111111111111111111111111111112';
 const rawOk=x=>typeof x==='string'&&/^[1-9]\d*$/.test(x)&&BigInt(x)<=18446744073709551615n;
 const q=(env,sql,args=[],mode='all')=>env.DB.prepare(sql).bind(...args)[mode]();
