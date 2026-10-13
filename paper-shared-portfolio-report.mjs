@@ -5,7 +5,7 @@ export function buildSharedPaperReport(snapshot,{maxQuoteAgeMs=90000}={}) {
  let cash=0n,pnl=0n,fees=0n,peak=BigInt(a.initial_lamports),maxDrawdownBps=0,unknownEvents=0;
  const held=new Map(),marks=new Map();
  const sequence={INITIAL:0,BUY:1,MARK:2,SELL:3,SKIP:4};
- const ledger=snapshot.ledger.slice().sort((x,y)=>Date.parse(x.checked_at)-Date.parse(y.checked_at)||sequence[x.event_type]-sequence[y.event_type]||x.operation_id.localeCompare(y.operation_id));
+ const ledger=snapshot.ledger.slice().sort((x,y)=>Date.parse(x.checked_at)-Date.parse(y.checked_at)||x.account_revision-y.account_revision||sequence[x.event_type]-sequence[y.event_type]||x.operation_id.localeCompare(y.operation_id));
  const positions=new Map(snapshot.positions.map(p=>[p.source_signature,p]));
  function equity(at){let value=cash;for(const [sig,raw] of held){const m=marks.get(sig),p=positions.get(sig);
   if(!m||m.raw!==raw||m.out===null||at-m.at<0||at-m.at>maxQuoteAgeMs)return null;
