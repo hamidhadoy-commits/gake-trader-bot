@@ -1,3 +1,4 @@
+import {sanitizeAuthRefreshFailure} from './host-auth-refresh.mjs';
 export const TERMINAL_FEED_EXIT=78;
 const RECOVERABLE_FEED_ERRORS=new Set(['REQUEST_OR_IO_FAILED','PUBLIC_RATE_LIMIT','PUBLIC_HTTP_ERROR','DATABASE_REQUEST_FAILED','AUTH_REFRESH_FAILED']);
 export function failureDecision(consecutiveFailures,{recoverTransient=false,reason}={}) {
@@ -17,6 +18,8 @@ export async function runFeedLoop({tick,state,save,once=false,recoverTransient=f
     catch(e){
       state.failures++;state.consecutiveFailures++;
       state.lastError={at:new Date(now()).toISOString(),reason:/^[A-Z_]+$/.test(e.message)?e.message:'REQUEST_OR_IO_FAILED'};
+      const authFailure=sanitizeAuthRefreshFailure(e.authRefreshFailure);
+      if(authFailure)state.lastError.authRefreshFailure=authFailure;
       const decision=failureDecision(state.consecutiveFailures,{recoverTransient,reason:state.lastError.reason});delayMs=decision.delayMs;terminal=decision.stop;
       state.status=terminal?'FAILED_RETRY_LIMIT':decision.recovery?'RECOVERY_WAIT':'RETRY_WAIT';
     }

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import {HOST_FEED_SELECTION_SQL,selectHostFeedMints} from './host-feed-selection.mjs';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {createHostAuth} from './host-auth-refresh.mjs';
 import {fileURLToPath} from 'node:url';
 import {acquireLock} from './host-process-lock.mjs';
 import {runFeedLoop} from './host-retry-policy.mjs';
@@ -15,18 +15,12 @@ const output=arg('--output')||path.join(configDir,'host-reference-publisher.json
 const lock=output+'.lock';let stopping=false;const stopController=new AbortController();
 const releaseLock=acquireLock(lock,{script:fileURLToPath(import.meta.url),output});
 process.on('SIGINT',()=>{stopping=true;stopController.abort()});process.on('SIGTERM',()=>{stopping=true;stopController.abort()});
-let token,refreshAt=0;
-function refresh(){
- const r=spawnSync(process.execPath,[cli,'deployments','list'],{env:{...process.env,XDG_CONFIG_HOME:configDir,WRANGLER_SEND_METRICS:'false'},encoding:'utf8',timeout:30000});
- if(r.status!==0)throw Error('AUTH_REFRESH_FAILED');
- token=fs.readFileSync(configPath,'utf8').match(/oauth_token\s*=\s*"([^"]+)"/)?.[1];
- if(!token)throw Error('AUTH_TOKEN_UNAVAILABLE');refreshAt=Date.now();
-}
+const auth=createHostAuth({configPath,configDir,cli,cwd:path.dirname(fileURLToPath(import.meta.url))});
 async function query(sql,params=[]){
- if(!token||Date.now()-refreshAt>1200000)refresh();
+ let token=auth.getToken();
  const url='https://api.cloudflare.com/client/v4/accounts/'+account+'/d1/database/'+db+'/query';
  let r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({sql,params}),signal:AbortSignal.timeout(15000)});
- if(r.status===401||r.status===403){refresh();r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({sql,params}),signal:AbortSignal.timeout(15000)})}
+ if(r.status===401||r.status===403){token=auth.getToken({forceRefresh:true});r=await fetch(url,{method:'POST',headers:{Authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({sql,params}),signal:AbortSignal.timeout(15000)})}
  const b=await r.json();if(!r.ok||!b.success)throw Error('DATABASE_REQUEST_FAILED');return b.result[0];
 }
 let state={startedAt:new Date().toISOString(),pid:process.pid,successes:0,failures:0,consecutiveFailures:0,status:'RUNNING'};
