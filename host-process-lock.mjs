@@ -3,17 +3,28 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 
+export function parseWindowsProcessInfo(stdout,{expectedBirth}={}) {
+  if(!stdout.trim())return null;
+  let info;try{info=JSON.parse(stdout);}catch{throw Error('PROCESS_INSPECTION_FAILED');}
+  if(typeof info?.birth!=='string'||!Number.isFinite(Date.parse(info.birth)))throw Error('PROCESS_INSPECTION_FAILED');
+  if(typeof info.command!=='string'||!info.command) {
+    // A protected unrelated process may hide its command. Only a known
+    // different birth can prove that it does not own this structured lock.
+    if(info.command!==null||!expectedBirth||info.birth===expectedBirth)throw Error('PROCESS_INSPECTION_FAILED');
+  }
+  return info;
+}
+
 // OS birth identity prevents a recycled PID from inheriting a project lock.
-export function inspectProcess(pid) {
+export function inspectProcess(pid,{expectedBirth}={}) {
   if(!Number.isSafeInteger(pid)||pid<=0)throw Error('INVALID_PROCESS_ID');
-  try{process.kill(pid,0);}catch(e){if(e.code==='ESRCH')return null;throw Error('PROCESS_INSPECTION_FAILED');}
   if(process.platform==='win32') {
-    const code=`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if($p){@{birth=$p.CreationDate.ToUniversalTime().ToString('o');command=$p.CommandLine;parent=$p.ParentProcessId}|ConvertTo-Json -Compress}`;
+    const code=`$ErrorActionPreference='Stop'; $p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if($p){@{birth=$p.CreationDate.ToUniversalTime().ToString('o');command=$p.CommandLine;parent=$p.ParentProcessId}|ConvertTo-Json -Compress}`;
     const r=spawnSync('powershell.exe',['-NoProfile','-EncodedCommand',Buffer.from(code,'utf16le').toString('base64')],{encoding:'utf8',timeout:10000,windowsHide:true});
     if(r.status!==0)throw Error('PROCESS_INSPECTION_FAILED');
-    if(!r.stdout.trim())return null;
-    const info=JSON.parse(r.stdout);if(!info.birth||!info.command)throw Error('PROCESS_INSPECTION_FAILED');return info;
+    return parseWindowsProcessInfo(r.stdout,{expectedBirth});
   }
+  try{process.kill(pid,0);}catch(e){if(e.code==='ESRCH')return null;throw Error('PROCESS_INSPECTION_FAILED');}
   if(process.platform==='linux') {
     try{
       const stat=fs.readFileSync(`/proc/${pid}/stat`,'utf8');
@@ -28,7 +39,7 @@ export function lockIsActive(lock,{script,output},inspect=inspectProcess) {
   let record;try{record=JSON.parse(fs.readFileSync(lock,'utf8'));}catch{throw Error('INVALID_PROCESS_LOCK');}
   const pid=typeof record==='number'?record:record?.pid;
   if(!Number.isSafeInteger(pid)||pid<=0)throw Error('INVALID_PROCESS_LOCK');
-  const info=inspect(pid);if(!info)return false;
+  const info=inspect(pid,typeof record==='object'?{expectedBirth:record.birth}:{});if(!info)return false;
   if(typeof record==='object') {
     if(!record.birth||!record.owner||record.script!==path.resolve(script)||record.output!==path.resolve(output))throw Error('INVALID_PROCESS_LOCK');
     return record.birth===info.birth;
